@@ -11,13 +11,14 @@ from django.conf import settings
 import os
 import socket
 import json
+from django.utils import timezone
 
 from django.apps import apps
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
-from .models import MotorEvent, MotorData
+from .models import MotorEvent, MotorData, BatchJob, BatchStepExecution, CommandOutbox, TelemetryIngest
 
 ongoing_events = []
 client = None
@@ -77,11 +78,189 @@ def device_event_done(device_id, motor):
     ongoing_events = tmp_array
 
 
+def _extract_device_metadata(envelope):
+    device = envelope.get('device') or {}
+    return (
+        device.get('type') or envelope.get('device_type'),
+        str(device.get('id') or envelope.get('device_id') or '') or None,
+    )
+
+
+def _resolve_envelope_context(envelope):
+    correlation = envelope.get('correlation') or {}
+    outbox = None
+    step_execution = None
+    job = None
+
+    outbox_id = correlation.get('outbox_id')
+    if outbox_id:
+        try:
+            outbox = CommandOutbox.objects.select_related('step_execution', 'job').get(id=outbox_id)
+        except CommandOutbox.DoesNotExist:
+            outbox = None
+
+    step_execution_id = correlation.get('step_execution_id')
+    if step_execution_id:
+        try:
+            step_execution = BatchStepExecution.objects.select_related('job').get(id=step_execution_id)
+        except BatchStepExecution.DoesNotExist:
+            step_execution = None
+
+    job_id = correlation.get('job_id')
+    if job_id:
+        try:
+            job = BatchJob.objects.get(id=job_id)
+        except BatchJob.DoesNotExist:
+            job = None
+
+    if outbox is not None:
+        if step_execution is None:
+            step_execution = outbox.step_execution
+        if job is None:
+            job = outbox.job
+    if step_execution is not None and job is None:
+        job = step_execution.job
+
+    return outbox, step_execution, job
+
+
+def _merge_step_telemetry(step_execution, envelope):
+    step_execution.telemetry = {
+        **(step_execution.telemetry or {}),
+        'last_device_reply': envelope,
+        'last_reply_at': timezone.now().isoformat(),
+        'last_reply_status': envelope.get('status'),
+        'last_reply_message_type': envelope.get('message_type'),
+    }
+
+
+def _sync_job_status(job):
+    if job is None:
+        return
+
+    step_qs = BatchStepExecution.objects.filter(job=job)
+    if not step_qs.exists():
+        return
+
+    if step_qs.filter(status='FAILED').exists():
+        job.status = 'FAILED'
+        if not job.finished_at:
+            job.finished_at = timezone.now()
+        job.save(update_fields=['status', 'finished_at', 'updated_at'])
+        return
+
+    if step_qs.exclude(status='DONE').exists():
+        if job.status != 'RUNNING':
+            job.status = 'RUNNING'
+            job.save(update_fields=['status', 'updated_at'])
+        return
+
+    job.status = 'DONE'
+    if not job.finished_at:
+        job.finished_at = timezone.now()
+    job.save(update_fields=['status', 'finished_at', 'updated_at'])
+
+
+def process_device_reply_envelope(topic, envelope):
+    interface_type = envelope.get('interface_type')
+    if interface_type not in ['service', 'action']:
+        raise ValueError('Unsupported interface_type in device reply envelope.')
+
+    message_type = envelope.get('message_type')
+    if message_type not in ['ack', 'progress', 'result', 'error']:
+        raise ValueError('Unsupported message_type in device reply envelope.')
+
+    status_value = envelope.get('status')
+    outbox, step_execution, job = _resolve_envelope_context(envelope)
+    device_type, device_id = _extract_device_metadata(envelope)
+
+    telemetry = TelemetryIngest.objects.create(
+        job=job,
+        step_execution=step_execution,
+        device_type=device_type,
+        device_id=device_id,
+        topic=topic,
+        payload=envelope,
+    )
+
+    if outbox is not None:
+        if message_type == 'error' or status_value == 'failed':
+            outbox.status = 'FAILED'
+            outbox.error_message = (envelope.get('error') or {}).get('message') or envelope.get('message')
+            outbox.save(update_fields=['status', 'error_message', 'updated_at'])
+        else:
+            outbox.status = 'ACKED'
+            if not outbox.acked_at:
+                outbox.acked_at = timezone.now()
+            outbox.save(update_fields=['status', 'acked_at', 'updated_at'])
+
+    if step_execution is not None:
+        _merge_step_telemetry(step_execution, envelope)
+        if message_type == 'ack' or status_value in ['accepted', 'queued']:
+            if step_execution.status == 'PENDING':
+                step_execution.status = 'QUEUED'
+            elif step_execution.status != 'DONE':
+                step_execution.status = 'RUNNING'
+            step_execution.save(update_fields=['status', 'telemetry', 'updated_at'])
+        elif message_type == 'progress' or status_value in ['running', 'executing']:
+            if not step_execution.started_at:
+                step_execution.started_at = timezone.now()
+            step_execution.status = 'RUNNING'
+            step_execution.save(update_fields=['status', 'started_at', 'telemetry', 'updated_at'])
+        elif message_type == 'result' and status_value in ['succeeded', 'done', 'completed']:
+            if not step_execution.started_at:
+                step_execution.started_at = timezone.now()
+            step_execution.status = 'DONE'
+            step_execution.finished_at = timezone.now()
+            step_execution.error_message = None
+            step_execution.save(
+                update_fields=['status', 'started_at', 'finished_at', 'error_message', 'telemetry', 'updated_at']
+            )
+        elif message_type == 'error' or status_value == 'failed':
+            if not step_execution.started_at:
+                step_execution.started_at = timezone.now()
+            step_execution.status = 'FAILED'
+            step_execution.finished_at = timezone.now()
+            step_execution.error_message = (envelope.get('error') or {}).get('message') or envelope.get('message')
+            step_execution.save(
+                update_fields=['status', 'started_at', 'finished_at', 'error_message', 'telemetry', 'updated_at']
+            )
+
+    _sync_job_status(job)
+
+    package = {
+        'type': 'mqtt_msg_broadcast',
+        'topic': 'device_reply',
+        'interface_type': interface_type,
+        'message_type': message_type,
+        'status': status_value,
+        'route_name': envelope.get('route_name'),
+        'device_type': device_type,
+        'device_id': device_id,
+        'job_id': job.id if job else None,
+        'step_execution_id': step_execution.id if step_execution else None,
+        'payload': envelope,
+        'telemetry_id': telemetry.id,
+    }
+    return package
+
+
 def on_message(mqtt_client, userdata, msg):
     topic = msg.topic
     payload = msg.payload.decode()
     channel_layer = get_channel_layer()
     if msg.topic.startswith('esp32_1/'):
+        if payload.startswith('{'):
+            try:
+                envelope = json.loads(payload)
+                interface_type = envelope.get('interface_type')
+                if interface_type in ['service', 'action']:
+                    package = process_device_reply_envelope(topic, envelope)
+                    async_to_sync(channel_layer.group_send)('mqtt_group', package)
+                    return
+            except (json.JSONDecodeError, ValueError):
+                pass
+
         # MQTT指令信号
         # cmd_motor_speed_time
         if payload.startswith('cmd_'):

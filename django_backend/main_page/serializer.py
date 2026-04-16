@@ -93,3 +93,31 @@ class TelemetryIngestSerializer(serializers.ModelSerializer):
     class Meta:
         model = TelemetryIngest
         fields = '__all__'
+
+
+class TopicPublishRequestSerializer(serializers.Serializer):
+    topic = serializers.CharField(max_length=128)
+    payload = serializers.JSONField()
+    job_id = serializers.IntegerField(required=False)
+    step_execution_id = serializers.IntegerField(required=False)
+    device = serializers.CharField(max_length=64, required=False, allow_blank=True)
+
+
+class ServiceCallRequestSerializer(serializers.Serializer):
+    service_name = serializers.CharField(max_length=128)
+    topic = serializers.CharField(max_length=128)
+    request = serializers.JSONField()
+    job_id = serializers.IntegerField(required=False)
+    step_execution_id = serializers.IntegerField(required=False)
+    timeout_sec = serializers.IntegerField(required=False, min_value=1)
+    device = serializers.CharField(max_length=64, required=False, allow_blank=True)
+
+
+class ActionGoalRequestSerializer(serializers.Serializer):
+    action_name = serializers.CharField(max_length=128)
+    topic = serializers.CharField(max_length=128)
+    goal = serializers.JSONField()
+    job_id = serializers.IntegerField(required=False)
+    step_execution_id = serializers.IntegerField(required=False)
+    expected_duration_sec = serializers.IntegerField(required=False, min_value=1)
+    device = serializers.CharField(max_length=64, required=False, allow_blank=True)

@@ -193,6 +193,7 @@
                     <div class="queue-table__head">
                         <span>Step</span>
                         <span>Type</span>
+                        <span>Interface</span>
                         <span>Target Topic</span>
                         <span>Parameters</span>
                     </div>
@@ -202,6 +203,11 @@
                             <span class="queue-name">{{ step.name || step.step_type }}</span>
                         </div>
                         <div class="queue-cell">{{ step.step_type }}</div>
+                        <div class="queue-cell">
+                            <span class="interface-badge" :class="interfaceBadgeClass(resolveStepInterface(step))">
+                                {{ resolveStepInterface(step) }}
+                            </span>
+                        </div>
                         <div class="queue-cell queue-cell--mono">{{ step.parameters?.topic || 'robot/actions' }}</div>
                         <div class="queue-cell">
                             <pre>{{ formatParameters(step.parameters) }}</pre>
@@ -245,11 +251,17 @@
                 <div v-if="jobStatus?.outbox_messages?.length" class="outbox-table">
                     <div class="outbox-table__head">
                         <span>Topic</span>
+                        <span>Interface</span>
                         <span>Status</span>
                         <span>Payload</span>
                     </div>
                     <article class="outbox-row" v-for="message in jobStatus.outbox_messages" :key="message.id">
                         <div class="outbox-cell outbox-cell--mono">{{ message.topic }}</div>
+                        <div class="outbox-cell">
+                            <span class="interface-badge" :class="interfaceBadgeClass(message.payload?.interface_type)">
+                                {{ message.payload?.interface_type || 'topic' }}
+                            </span>
+                        </div>
                         <div class="outbox-cell">{{ message.status }}</div>
                         <div class="outbox-cell">
                             <pre>{{ formatParameters(message.payload) }}</pre>
@@ -259,6 +271,34 @@
 
                 <div v-else class="empty-state">
                     Create and dispatch a job to inspect outbox traffic and step state.
+                </div>
+
+                <div v-if="jobStatus?.step_executions?.length" class="reply-board">
+                    <div class="reply-board__head">
+                        <span>Step Runtime</span>
+                        <span>Interface</span>
+                        <span>Status</span>
+                        <span>Latest Reply</span>
+                    </div>
+                    <article class="reply-row" v-for="execution in jobStatus.step_executions" :key="execution.id">
+                        <div class="reply-cell">
+                            <span class="queue-step">{{ execution.command_payload?.step_no || execution.id }}</span>
+                            <span class="queue-name">{{ execution.command_payload?.name || execution.recipe_step }}</span>
+                        </div>
+                        <div class="reply-cell">
+                            <span class="interface-badge" :class="interfaceBadgeClass(execution.command_payload?.interface_type)">
+                                {{ execution.command_payload?.interface_type || 'topic' }}
+                            </span>
+                        </div>
+                        <div class="reply-cell">{{ execution.status }}</div>
+                        <div class="reply-cell">
+                            <div class="reply-meta" v-if="execution.telemetry?.last_reply_message_type">
+                                <span class="reply-type">{{ execution.telemetry.last_reply_message_type }}</span>
+                                <span class="reply-status">{{ execution.telemetry.last_reply_status || 'n/a' }}</span>
+                            </div>
+                            <div class="reply-copy">{{ summariseExecutionReply(execution) }}</div>
+                        </div>
+                    </article>
                 </div>
             </section>
         </div>
@@ -276,10 +316,16 @@
                 <div v-if="liveEvents.length" class="event-stream">
                     <article class="event-card" v-for="event in liveEvents" :key="event.key">
                         <div class="event-card__head">
-                            <span class="event-topic">{{ event.topic }}</span>
+                            <span class="event-topic">
+                                {{ event.topic }}
+                                <span v-if="event.interfaceType" class="event-topic__meta">{{ event.interfaceType }}</span>
+                            </span>
                             <span class="event-time">{{ event.time }}</span>
                         </div>
                         <p class="event-summary">{{ event.summary }}</p>
+                        <div v-if="event.progressLabel" class="event-progress">
+                            <span>{{ event.progressLabel }}</span>
+                        </div>
                     </article>
                 </div>
 
@@ -406,6 +452,9 @@ export default {
         },
         previewReady() {
             return Boolean(this.selectedRecipe && this.steps.length)
+        },
+        latestDeviceReply() {
+            return this.liveEvents.find(event => event.topic === 'device_reply') || null
         }
     },
     methods: {
@@ -427,6 +476,42 @@ export default {
         formatParameters(parameters) {
             return JSON.stringify(parameters || {}, null, 2)
         },
+        resolveStepInterface(step) {
+            if (step.parameters?.interface_type) {
+                return step.parameters.interface_type
+            }
+            if (['STIR', 'DISPENSE'].includes(step.step_type)) {
+                return 'topic'
+            }
+            if (['MOVE_ARM', 'HEAT', 'CLEAN'].includes(step.step_type)) {
+                return 'action'
+            }
+            if (['WAIT', 'SAMPLE'].includes(step.step_type)) {
+                return 'service'
+            }
+            return 'topic'
+        },
+        interfaceBadgeClass(interfaceType) {
+            return `interface-badge--${interfaceType || 'topic'}`
+        },
+        summariseExecutionReply(execution) {
+            const reply = execution.telemetry?.last_device_reply
+            if (!reply) {
+                return execution.error_message || 'No device reply yet.'
+            }
+            if (reply.message_type === 'progress') {
+                const percent = reply.progress?.percent
+                const stage = reply.progress?.stage
+                return percent != null ? `Progress ${percent}%${stage ? ` • ${stage}` : ''}` : (stage || 'Progress update received.')
+            }
+            if (reply.message_type === 'result') {
+                return reply.result ? JSON.stringify(reply.result) : 'Execution completed successfully.'
+            }
+            if (reply.message_type === 'error') {
+                return reply.error?.message || reply.message || execution.error_message || 'Execution failed.'
+            }
+            return reply.status || reply.message_type || 'Reply received.'
+        },
         connectRealtimeFeed() {
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
             this.wsClient = new WebSocket(`${protocol}://127.0.0.1:8000/websocket/`)
@@ -444,15 +529,41 @@ export default {
                             ? `Motor ${payload.motor} PCNT=${payload.pcnt}`
                             : payload.topic === 'pwm'
                                 ? `Motor ${payload.motor} PWM=${payload.pwm}`
-                                : JSON.stringify(payload)
+                                : payload.topic === 'device_reply'
+                                    ? this.summariseDeviceReplyEvent(payload)
+                                    : JSON.stringify(payload)
 
             this.liveEvents.unshift({
                 key: `${Date.now()}-${Math.random()}`,
                 topic: payload.topic || 'event',
                 time: new Date().toLocaleTimeString(),
-                summary
+                summary,
+                interfaceType: payload.interface_type || '',
+                progressLabel: payload.payload?.progress?.percent != null
+                    ? `${payload.payload.progress.percent}% · ${payload.payload.progress.stage || payload.status || 'running'}`
+                    : ''
             })
             this.liveEvents = this.liveEvents.slice(0, 10)
+        },
+        summariseDeviceReplyEvent(payload) {
+            const body = payload.payload || {}
+            const routeName = payload.route_name || body.route_name || 'device route'
+            const device = [payload.device_type, payload.device_id].filter(Boolean).join(':')
+            if (payload.message_type === 'ack') {
+                return `${routeName} accepted by ${device || 'device'}`
+            }
+            if (payload.message_type === 'progress') {
+                const percent = body.progress?.percent
+                const stage = body.progress?.stage
+                return `${routeName} running${percent != null ? ` at ${percent}%` : ''}${stage ? ` • ${stage}` : ''}`
+            }
+            if (payload.message_type === 'result') {
+                return `${routeName} completed on ${device || 'device'}`
+            }
+            if (payload.message_type === 'error') {
+                return `${routeName} failed: ${body.error?.message || body.message || 'unknown error'}`
+            }
+            return `${routeName} reported ${payload.status || payload.message_type || 'update'}`
         },
         stopStatusPolling() {
             if (this.statusPoller) {
@@ -855,7 +966,7 @@ export default {
 .queue-table__head,
 .queue-row {
     display: grid;
-    grid-template-columns: 0.9fr 0.8fr 1fr 1.5fr;
+    grid-template-columns: 0.9fr 0.7fr 0.7fr 1fr 1.5fr;
     gap: 0.75rem;
     align-items: start;
     padding: 0.95rem 1rem;
@@ -864,7 +975,7 @@ export default {
 .outbox-table__head,
 .outbox-row {
     display: grid;
-    grid-template-columns: 0.9fr 0.5fr 1.6fr;
+    grid-template-columns: 0.9fr 0.7fr 0.5fr 1.4fr;
     gap: 0.75rem;
     align-items: start;
     padding: 0.95rem 1rem;
@@ -935,6 +1046,34 @@ export default {
     color: #111827;
 }
 
+.interface-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 84px;
+    padding: 0.28rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.interface-badge--topic {
+    background: #edf6ff;
+    color: #1f5f95;
+}
+
+.interface-badge--service {
+    background: #f1f5e8;
+    color: #4f6f1f;
+}
+
+.interface-badge--action {
+    background: #fff3e8;
+    color: #9a5711;
+}
+
 .status-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -970,6 +1109,14 @@ export default {
     font-weight: 700;
 }
 
+.event-topic__meta {
+    margin-left: 0.45rem;
+    color: #64748b;
+    font-size: 0.76rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
 .event-time {
     color: #64748b;
     font-size: 0.82rem;
@@ -978,6 +1125,72 @@ export default {
 .event-summary {
     color: #475569;
     line-height: 1.55;
+}
+
+.event-progress {
+    margin-top: 0.5rem;
+    color: #285b97;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.reply-board {
+    margin-top: 1rem;
+    border-radius: 18px;
+    overflow: hidden;
+    border: 1px solid rgba(15, 23, 36, 0.08);
+}
+
+.reply-board__head,
+.reply-row {
+    display: grid;
+    grid-template-columns: 1fr 0.7fr 0.6fr 1.6fr;
+    gap: 0.75rem;
+    align-items: start;
+    padding: 0.9rem 1rem;
+}
+
+.reply-board__head {
+    background: #ecf2f8;
+    color: #5f6d81;
+    font-size: 0.74rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+}
+
+.reply-row {
+    background: #ffffff;
+    border-top: 1px solid rgba(15, 23, 36, 0.06);
+}
+
+.reply-row:nth-child(even) {
+    background: #fafcfe;
+}
+
+.reply-cell {
+    color: #1f2937;
+    font-size: 0.92rem;
+}
+
+.reply-meta {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+    flex-wrap: wrap;
+}
+
+.reply-type,
+.reply-status {
+    font-size: 0.74rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #5b6575;
+}
+
+.reply-copy {
+    color: #475569;
+    line-height: 1.5;
 }
 
 .flow-card {

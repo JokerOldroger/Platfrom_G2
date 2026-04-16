@@ -9,7 +9,8 @@ from .models import (
 )
 from .serializer import TaskSerializer, MotorControlSerializer, UserSerializer, LoginRecordSerializer, \
     SpinningSerializer, ExperimentProcessSerializer, MaterialTypeSerializer, MaterialRecipeSerializer, \
-    RecipeStepSerializer, BatchJobSerializer, BatchStepExecutionSerializer, CommandOutboxSerializer
+    RecipeStepSerializer, BatchJobSerializer, BatchStepExecutionSerializer, CommandOutboxSerializer, \
+    TopicPublishRequestSerializer, ServiceCallRequestSerializer, ActionGoalRequestSerializer
 from django.contrib.auth.hashers import make_password, check_password
 from django.http import JsonResponse
 from datetime import datetime
@@ -329,10 +330,13 @@ def _build_planned_parameters(recipe, overrides):
 
 
 def _build_step_command_payload(recipe_step, planned_parameters):
+    interface_type, route_name = _resolve_step_interface(recipe_step.step_type, recipe_step.parameters or {})
     payload = {
         'step_no': recipe_step.step_no,
         'step_type': recipe_step.step_type,
         'name': recipe_step.name or f'Step {recipe_step.step_no}',
+        'interface_type': interface_type,
+        'route_name': route_name,
         'parameters': recipe_step.parameters or {},
         'planned_parameters': planned_parameters,
     }
@@ -382,7 +386,9 @@ def _resolve_motor_command(step_execution):
         'payload': raw_payload,
         'transport': 'mqtt',
         'device': parameters.get('device', 'esp32'),
-        'command_type': 'motor_cmd'
+        'command_type': 'motor_cmd',
+        'interface_type': 'topic',
+        'route_name': topic,
     }
 
 
@@ -407,15 +413,205 @@ def _resolve_generic_command(step_execution):
         'payload': generic_payload,
         'transport': 'mqtt',
         'device': parameters.get('device', 'generic'),
-        'command_type': 'generic_json'
+        'command_type': 'generic_json',
+        'interface_type': payload.get('interface_type', 'topic'),
+        'route_name': payload.get('route_name') or topic,
     }
 
 
+def _resolve_step_interface(step_type, parameters):
+    explicit_interface = parameters.get('interface_type')
+    if explicit_interface:
+        route_name = parameters.get('route_name') or parameters.get('service_name') or parameters.get('action_name') or parameters.get('topic')
+        return explicit_interface, route_name
+
+    if step_type in ['STIR', 'DISPENSE']:
+        return 'topic', parameters.get('topic', 'esp32_1/control')
+    if step_type in ['MOVE_ARM', 'HEAT', 'CLEAN']:
+        return 'action', parameters.get('action_name') or parameters.get('topic')
+    if step_type in ['WAIT', 'SAMPLE']:
+        return 'service', parameters.get('service_name') or parameters.get('topic')
+    return 'topic', parameters.get('topic')
+
+
 def _resolve_dispatch_command(step_execution):
-    step_type = step_execution.command_payload.get('step_type')
+    payload = step_execution.command_payload or {}
+    step_type = payload.get('step_type')
+    interface_type = payload.get('interface_type')
     if step_type in ['STIR', 'DISPENSE']:
         return _resolve_motor_command(step_execution)
+    if interface_type in ['topic', 'service', 'action']:
+        return _resolve_generic_command(step_execution)
     return _resolve_generic_command(step_execution)
+
+
+def _resolve_outbox_context(job_id=None, step_execution_id=None):
+    job = None
+    step_execution = None
+
+    if step_execution_id is not None:
+        try:
+            step_execution = BatchStepExecution.objects.get(id=step_execution_id)
+        except BatchStepExecution.DoesNotExist:
+            raise ValueError('Step execution not found.')
+        job = step_execution.job
+
+    if job_id is not None:
+        try:
+            requested_job = BatchJob.objects.get(id=job_id)
+        except BatchJob.DoesNotExist:
+            raise ValueError('Job not found.')
+        if job is not None and job.id != requested_job.id:
+            raise ValueError('step_execution_id does not belong to job_id.')
+        job = requested_job
+
+    return job, step_execution
+
+
+def _queue_transport_message(*, topic, payload, interface_type, route_name, job=None, step_execution=None, device=None):
+    outbox = CommandOutbox.objects.create(
+        job=job,
+        step_execution=step_execution,
+        topic=topic,
+        payload={
+            'interface_type': interface_type,
+            'route_name': route_name,
+            'device': device,
+            'body': payload,
+        },
+        status='QUEUED',
+    )
+
+    dispatch_error = None
+    if mqtt_client_available():
+        try:
+            publish_device_command(topic, payload)
+            outbox.status = 'SENT'
+            outbox.sent_at = timezone.now()
+            outbox.save(update_fields=['status', 'sent_at', 'updated_at'])
+        except Exception as exc:
+            dispatch_error = str(exc)
+            outbox.status = 'FAILED'
+            outbox.error_message = dispatch_error
+            outbox.save(update_fields=['status', 'error_message', 'updated_at'])
+    else:
+        dispatch_error = 'MQTT client unavailable.'
+
+    return outbox, dispatch_error
+
+
+@api_view(['POST'])
+def communication_topic_publish(request):
+    serializer = TopicPublishRequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    data = serializer.validated_data
+    try:
+        job, step_execution = _resolve_outbox_context(
+            job_id=data.get('job_id'),
+            step_execution_id=data.get('step_execution_id'),
+        )
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    outbox, dispatch_error = _queue_transport_message(
+        topic=data['topic'],
+        payload=data['payload'],
+        interface_type='topic',
+        route_name=data['topic'],
+        job=job,
+        step_execution=step_execution,
+        device=data.get('device'),
+    )
+
+    return Response({
+        'interface_type': 'topic',
+        'outbox_message': CommandOutboxSerializer(outbox).data,
+        'mqtt_available': mqtt_client_available(),
+        'dispatched': outbox.status == 'SENT',
+        'detail': dispatch_error or 'Topic message published successfully.',
+    }, status=status.HTTP_200_OK if outbox.status == 'SENT' else status.HTTP_202_ACCEPTED)
+
+
+@api_view(['POST'])
+def communication_service_call(request):
+    serializer = ServiceCallRequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    data = serializer.validated_data
+    try:
+        job, step_execution = _resolve_outbox_context(
+            job_id=data.get('job_id'),
+            step_execution_id=data.get('step_execution_id'),
+        )
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    payload = {
+        'service_name': data['service_name'],
+        'request': data['request'],
+        'timeout_sec': data.get('timeout_sec', 10),
+    }
+    outbox, dispatch_error = _queue_transport_message(
+        topic=data['topic'],
+        payload=payload,
+        interface_type='service',
+        route_name=data['service_name'],
+        job=job,
+        step_execution=step_execution,
+        device=data.get('device'),
+    )
+
+    return Response({
+        'interface_type': 'service',
+        'service_name': data['service_name'],
+        'outbox_message': CommandOutboxSerializer(outbox).data,
+        'mqtt_available': mqtt_client_available(),
+        'dispatched': outbox.status == 'SENT',
+        'detail': dispatch_error or 'Service request dispatched. Await device response asynchronously.',
+    }, status=status.HTTP_200_OK if outbox.status == 'SENT' else status.HTTP_202_ACCEPTED)
+
+
+@api_view(['POST'])
+def communication_action_goal(request):
+    serializer = ActionGoalRequestSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    data = serializer.validated_data
+    try:
+        job, step_execution = _resolve_outbox_context(
+            job_id=data.get('job_id'),
+            step_execution_id=data.get('step_execution_id'),
+        )
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    payload = {
+        'action_name': data['action_name'],
+        'goal': data['goal'],
+        'expected_duration_sec': data.get('expected_duration_sec'),
+    }
+    outbox, dispatch_error = _queue_transport_message(
+        topic=data['topic'],
+        payload=payload,
+        interface_type='action',
+        route_name=data['action_name'],
+        job=job,
+        step_execution=step_execution,
+        device=data.get('device'),
+    )
+
+    return Response({
+        'interface_type': 'action',
+        'action_name': data['action_name'],
+        'outbox_message': CommandOutboxSerializer(outbox).data,
+        'mqtt_available': mqtt_client_available(),
+        'dispatched': outbox.status == 'SENT',
+        'detail': dispatch_error or 'Action goal dispatched. Track progress through job status or telemetry.',
+    }, status=status.HTTP_200_OK if outbox.status == 'SENT' else status.HTTP_202_ACCEPTED)
 
 
 @api_view(['POST'])
@@ -495,6 +691,8 @@ def batch_job_start(request, job_id):
                     step_execution=step_execution,
                     topic=dispatch['topic'],
                     payload={
+                        'interface_type': dispatch.get('interface_type'),
+                        'route_name': dispatch.get('route_name'),
                         'transport': dispatch['transport'],
                         'device': dispatch['device'],
                         'command_type': dispatch['command_type'],
@@ -514,6 +712,8 @@ def batch_job_start(request, job_id):
                     'dispatch_topic': dispatch['topic'],
                     'dispatch_payload': dispatch['payload'],
                     'dispatch_transport': dispatch['transport'],
+                    'dispatch_interface_type': dispatch.get('interface_type'),
+                    'dispatch_route_name': dispatch.get('route_name'),
                 }
                 step_execution.save(update_fields=['status', 'started_at', 'telemetry', 'updated_at'])
                 dispatched_messages.append(outbox)

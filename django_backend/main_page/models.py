@@ -286,8 +286,12 @@ class BatchStepExecution(models.Model):
 
 class CommandOutbox(models.Model):
     id = models.AutoField(primary_key=True, null=False)
-    job = models.ForeignKey(BatchJob, on_delete=models.CASCADE, related_name='outbox_messages')
-    step_execution = models.ForeignKey(BatchStepExecution, on_delete=models.CASCADE, related_name='outbox_messages')
+    job = models.ForeignKey(
+        BatchJob, on_delete=models.CASCADE, null=True, blank=True, related_name='outbox_messages'
+    )
+    step_execution = models.ForeignKey(
+        BatchStepExecution, on_delete=models.CASCADE, null=True, blank=True, related_name='outbox_messages'
+    )
     topic = models.CharField(max_length=128, null=False)
     payload = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=20, choices=OUTBOX_STATUS_CHOICES, default='QUEUED', null=False)
