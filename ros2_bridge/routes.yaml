@@ -1,0 +1,9 @@
+routes:
+  arm.execute_trajectory:
+    interface_type: action
+    device_type: roboarm
+    node: arm01
+  gripper.set_force:
+    interface_type: action
+    device_type: gripper
+    node: gripper01

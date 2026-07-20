@@ -27,7 +27,18 @@ from .mqtt import (
     emergency_stop, resume_devices, dispatch_motor_task, get_device_states,
     get_mqtt_connection_state, can_dispatch_to_device, can_dispatch_motor, acknowledge_device,
     _device_control_topic, _extract_device_id_from_topic, _broadcast,
-    resolve_dispatchable_device_id,
+    resolve_dispatchable_device_id, process_device_reply_envelope,
+)
+from .ros2_bridge_client import dispatch_ros2_bridge_command
+from .orchestration.service import start_job
+from .orchestration.dispatch_runtime import (
+    default_device_id as orchestration_default_device_id,
+    dispatch_transport_message as orchestration_dispatch_transport_message,
+    extract_device_id_from_topic as orchestration_extract_device_id_from_topic,
+)
+from .orchestration.step_executors import (
+    build_planned_parameters,
+    default_step_executor_registry,
 )
 
 import requests
@@ -725,142 +736,34 @@ def recipe_step_list_create(request, recipe_id):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-def _build_planned_parameters(recipe, overrides):
-    def _jsonable(value):
-        if isinstance(value, Decimal):
-            return float(value)
-        return value
-
-    planned = {
-        'dmac_dosage_ml': _jsonable(recipe.dmac_dosage_ml),
-        'water_dosage_ml': _jsonable(recipe.water_dosage_ml),
-        'solvent_ph': _jsonable(recipe.solvent_ph),
-        'reaction_temperature_c': _jsonable(recipe.reaction_temperature_c),
-        'stirring_speed_rpm': _jsonable(recipe.stirring_speed_rpm),
-        'stirring_duration_min': _jsonable(recipe.stirring_duration_min),
-    }
-    for key, value in (overrides or {}).items():
-        if key in planned:
-            planned[key] = _jsonable(value)
-    return planned
-
-
 def _build_step_command_payload(recipe_step, planned_parameters):
-    interface_type, route_name = _resolve_step_interface(recipe_step.step_type, recipe_step.parameters or {})
-    payload = {
-        'step_no': recipe_step.step_no,
-        'step_type': recipe_step.step_type,
-        'name': recipe_step.name or f'Step {recipe_step.step_no}',
-        'interface_type': interface_type,
-        'route_name': route_name,
-        'parameters': recipe_step.parameters or {},
-        'planned_parameters': planned_parameters,
-    }
-    return payload
-
-
-def _coerce_positive_int(value, default=None):
-    if value is None or value == '':
-        return default
-    return max(int(float(value)), 0)
-
-
-def _resolve_motor_command(step_execution):
-    payload = step_execution.command_payload or {}
-    parameters = payload.get('parameters') or {}
-    planned = payload.get('planned_parameters') or {}
-
-    motor = parameters.get('motor')
-    if motor is None:
-        motor = parameters.get('motor_index', 0)
-
-    speed = parameters.get('speed')
-    if speed is None and parameters.get('speed_key'):
-        speed = planned.get(parameters.get('speed_key'))
-    if speed is None:
-        speed = planned.get('stirring_speed_rpm')
-
-    duration = parameters.get('duration_sec')
-    if duration is None and parameters.get('duration_key'):
-        duration = planned.get(parameters.get('duration_key'))
-    if duration is None:
-        duration_min = planned.get('stirring_duration_min')
-        if duration_min is not None:
-            duration = float(duration_min) * 60
-
-    motor = _coerce_positive_int(motor, 0)
-    speed = _coerce_positive_int(speed)
-    duration = _coerce_positive_int(duration)
-    if speed is None or duration is None:
-        raise ValueError('Motor step is missing speed or duration.')
-
-    default_topic = _device_control_topic(getattr(settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1'))
-    topic = parameters.get('topic', default_topic)
-    raw_payload = f'cmd_{motor}_{speed}_{duration}'
-
-    return {
-        'topic': topic,
-        'payload': raw_payload,
-        'transport': 'mqtt',
-        'device': parameters.get('device', 'esp32'),
-        'command_type': 'motor_cmd',
-        'interface_type': 'topic',
-        'route_name': topic,
-    }
-
-
-def _resolve_generic_command(step_execution):
-    payload = step_execution.command_payload or {}
-    parameters = payload.get('parameters') or {}
-    topic = parameters.get('topic')
-    if not topic:
-        raise ValueError('Step parameters must define a topic for generic dispatch.')
-
-    generic_payload = {
-        'job_id': step_execution.job_id,
-        'step_execution_id': step_execution.id,
-        'step_no': payload.get('step_no'),
-        'step_type': payload.get('step_type'),
-        'name': payload.get('name'),
-        'parameters': parameters,
-        'planned_parameters': payload.get('planned_parameters') or {}
-    }
-    return {
-        'topic': topic,
-        'payload': generic_payload,
-        'transport': 'mqtt',
-        'device': parameters.get('device', 'generic'),
-        'command_type': 'generic_json',
-        'interface_type': payload.get('interface_type', 'topic'),
-        'route_name': payload.get('route_name') or topic,
-    }
-
-
-def _resolve_step_interface(step_type, parameters):
-    explicit_interface = parameters.get('interface_type')
-    if explicit_interface:
-        route_name = parameters.get('route_name') or parameters.get('service_name') or parameters.get('action_name') or parameters.get('topic')
-        return explicit_interface, route_name
-
-    if step_type in ['STIR', 'DISPENSE']:
-        default_topic = _device_control_topic(getattr(settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1'))
-        return 'topic', parameters.get('topic', default_topic)
-    if step_type in ['MOVE_ARM', 'HEAT', 'CLEAN']:
-        return 'action', parameters.get('action_name') or parameters.get('topic')
-    if step_type in ['WAIT', 'SAMPLE']:
-        return 'service', parameters.get('service_name') or parameters.get('topic')
-    return 'topic', parameters.get('topic')
+    return default_step_executor_registry.build_command_payload(
+        recipe_step,
+        planned_parameters,
+        default_device_id=getattr(settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1'),
+    )
 
 
 def _resolve_dispatch_command(step_execution):
-    payload = step_execution.command_payload or {}
-    step_type = payload.get('step_type')
-    interface_type = payload.get('interface_type')
-    if step_type in ['STIR', 'DISPENSE']:
-        return _resolve_motor_command(step_execution)
-    if interface_type in ['topic', 'service', 'action']:
-        return _resolve_generic_command(step_execution)
-    return _resolve_generic_command(step_execution)
+    return default_step_executor_registry.resolve_dispatch(
+        step_execution,
+        default_control_topic=_device_control_topic(getattr(settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1')),
+    )
+
+
+def _dispatch_transport_message(*, transport, topic, payload, interface_type, route_name, device=None, correlation=None):
+    if transport == 'mqtt':
+        publish_device_command(topic, payload)
+        return {'accepted': True, 'transport': 'mqtt'}
+    if transport == 'ros2':
+        return dispatch_ros2_bridge_command(
+            route_name=route_name,
+            interface_type=interface_type,
+            payload=payload,
+            device=device,
+            correlation=correlation,
+        )
+    raise ValueError(f'Unsupported transport: {transport}')
 
 
 def _resolve_outbox_context(job_id=None, step_execution_id=None):
@@ -886,12 +789,13 @@ def _resolve_outbox_context(job_id=None, step_execution_id=None):
     return job, step_execution
 
 
-def _queue_transport_message(*, topic, payload, interface_type, route_name, job=None, step_execution=None, device=None):
+def _queue_transport_message(*, topic, payload, interface_type, route_name, transport='mqtt', job=None, step_execution=None, device=None):
     outbox = CommandOutbox.objects.create(
         job=job,
         step_execution=step_execution,
         topic=topic,
         payload={
+            'transport': transport,
             'interface_type': interface_type,
             'route_name': route_name,
             'device': device,
@@ -906,7 +810,7 @@ def _queue_transport_message(*, topic, payload, interface_type, route_name, job=
     device_id = None
     if device and isinstance(device, dict):
         device_id = str(device.get('id') or device.get('device_id') or '')
-    if device_id:
+    if transport == 'mqtt' and device_id:
         ok, reason = can_dispatch_to_device(device_id)
         if not ok:
             dispatch_error = reason
@@ -915,19 +819,37 @@ def _queue_transport_message(*, topic, payload, interface_type, route_name, job=
             outbox.save(update_fields=['status', 'error_message', 'updated_at'])
             return outbox, dispatch_error
 
-    if mqtt_client_available():
-        try:
-            publish_device_command(topic, payload)
+    if transport == 'mqtt' and not mqtt_client_available():
+        return outbox, 'MQTT client unavailable.'
+
+    try:
+        dispatch_result = _dispatch_transport_message(
+            transport=transport,
+            topic=topic,
+            payload=payload,
+            interface_type=interface_type,
+            route_name=route_name,
+            device=device,
+            correlation={
+                'job_id': job.id if job else None,
+                'step_execution_id': step_execution.id if step_execution else None,
+                'outbox_id': outbox.id,
+            },
+        )
+        if dispatch_result.get('accepted', True):
             outbox.status = 'SENT'
             outbox.sent_at = timezone.now()
             outbox.save(update_fields=['status', 'sent_at', 'updated_at'])
-        except Exception as exc:
-            dispatch_error = str(exc)
+        else:
+            dispatch_error = dispatch_result.get('detail') or 'Bridge rejected the message.'
             outbox.status = 'FAILED'
             outbox.error_message = dispatch_error
             outbox.save(update_fields=['status', 'error_message', 'updated_at'])
-    else:
-        dispatch_error = 'MQTT client unavailable.'
+    except Exception as exc:
+        dispatch_error = str(exc)
+        outbox.status = 'FAILED'
+        outbox.error_message = dispatch_error
+        outbox.save(update_fields=['status', 'error_message', 'updated_at'])
 
     return outbox, dispatch_error
 
@@ -952,6 +874,7 @@ def communication_topic_publish(request):
         payload=data['payload'],
         interface_type='topic',
         route_name=data['topic'],
+        transport=request.data.get('transport', 'mqtt'),
         job=job,
         step_execution=step_execution,
         device=data.get('device'),
@@ -991,6 +914,7 @@ def communication_service_call(request):
         payload=payload,
         interface_type='service',
         route_name=data['service_name'],
+        transport=request.data.get('transport', 'mqtt'),
         job=job,
         step_execution=step_execution,
         device=data.get('device'),
@@ -1031,6 +955,7 @@ def communication_action_goal(request):
         payload=payload,
         interface_type='action',
         route_name=data['action_name'],
+        transport=request.data.get('transport', 'mqtt'),
         job=job,
         step_execution=step_execution,
         device=data.get('device'),
@@ -1062,7 +987,7 @@ def batch_job_create(request):
         return Response({'overrides': ['Must be a JSON object.']}, status=status.HTTP_400_BAD_REQUEST)
 
     operator = request.data.get('operator')
-    planned_parameters = _build_planned_parameters(recipe, overrides)
+    planned_parameters = build_planned_parameters(recipe, overrides)
     recipe_steps = list(RecipeStep.objects.filter(recipe=recipe).order_by('step_no', 'id'))
     if not recipe_steps:
         return Response({'detail': 'Recipe has no steps configured.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1100,86 +1025,89 @@ def batch_job_start(request, job_id):
     except BatchJob.DoesNotExist:
         return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    if job.status not in ['PENDING', 'PAUSED']:
-        return Response({'detail': f'Job cannot be started from status {job.status}.'}, status=status.HTTP_400_BAD_REQUEST)
-
-    dispatched_messages = []
-    failed_steps = []
-
-    with transaction.atomic():
-        now = timezone.now()
-        if not job.started_at:
-            job.started_at = now
-        job.status = 'RUNNING'
-        job.error_message = None
-        job.save(update_fields=['status', 'error_message', 'started_at', 'updated_at'])
-
-        pending_steps = BatchStepExecution.objects.filter(job=job, status='PENDING').order_by('id')
-        for step_execution in pending_steps:
-            try:
-                dispatch = _resolve_dispatch_command(step_execution)
-
-                # 检查目标设备是否在线且空闲
-                device_id = _extract_device_id_from_topic(dispatch['topic']) or getattr(
-                    settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1'
-                )
-                ok, reason = can_dispatch_to_device(device_id)
-                if not ok:
-                    raise ValueError(reason)
-
-                outbox = CommandOutbox.objects.create(
-                    job=job,
-                    step_execution=step_execution,
-                    topic=dispatch['topic'],
-                    payload={
-                        'interface_type': dispatch.get('interface_type'),
-                        'route_name': dispatch.get('route_name'),
-                        'transport': dispatch['transport'],
-                        'device': dispatch['device'],
-                        'command_type': dispatch['command_type'],
-                        'body': dispatch['payload'],
-                    },
-                    status='QUEUED',
-                )
-                publish_device_command(dispatch['topic'], dispatch['payload'])
-                outbox.status = 'SENT'
-                outbox.sent_at = timezone.now()
-                outbox.save(update_fields=['status', 'sent_at', 'updated_at'])
-
-                step_execution.status = 'RUNNING'
-                step_execution.started_at = timezone.now()
-                step_execution.telemetry = {
-                    **(step_execution.telemetry or {}),
-                    'dispatch_topic': dispatch['topic'],
-                    'dispatch_payload': dispatch['payload'],
-                    'dispatch_transport': dispatch['transport'],
-                    'dispatch_interface_type': dispatch.get('interface_type'),
-                    'dispatch_route_name': dispatch.get('route_name'),
-                }
-                step_execution.save(update_fields=['status', 'started_at', 'telemetry', 'updated_at'])
-                dispatched_messages.append(outbox)
-            except Exception as exc:
-                step_execution.status = 'FAILED'
-                step_execution.error_message = str(exc)
-                step_execution.save(update_fields=['status', 'error_message', 'updated_at'])
-                failed_steps.append({
-                    'step_execution_id': step_execution.id,
-                    'step_no': step_execution.command_payload.get('step_no'),
-                    'error': str(exc),
-                })
-
-        if failed_steps and not dispatched_messages:
-            job.status = 'FAILED'
-            job.error_message = 'Unable to dispatch any device commands.'
-            job.finished_at = timezone.now()
-            job.save(update_fields=['status', 'error_message', 'finished_at', 'updated_at'])
+    try:
+        result = start_job(
+            job,
+            resolve_dispatch_command=_resolve_dispatch_command,
+            dispatch_transport_message=_dispatch_transport_message,
+            can_dispatch_to_device=can_dispatch_to_device,
+            extract_device_id_from_topic=_extract_device_id_from_topic,
+            default_device_id=getattr(settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1'),
+        )
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
     return Response({
         'job_id': job.id,
         'status': job.status,
         'mqtt_available': mqtt_client_available(),
-        'dispatched_messages': CommandOutboxSerializer(dispatched_messages, many=True).data,
-        'failed_steps': failed_steps,
+        'dispatched_messages': CommandOutboxSerializer(result.dispatched_messages, many=True).data,
+        'failed_steps': result.failed_steps,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def bridge_reply_ingest(request):
+    envelope = request.data.copy()
+    topic = envelope.pop('topic', None)
+    if not topic:
+        device = envelope.get('device') or {}
+        topic = f"bridge/{device.get('type', 'ros2')}/{device.get('id', 'unknown')}/replies"
+
+    package = process_device_reply_envelope(topic, envelope)
+    if package is None:
+        return Response({'detail': 'Envelope ignored.'}, status=status.HTTP_202_ACCEPTED)
+    return Response(package, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def batch_job_resume(request, job_id):
+    from .orchestration.service import resume_job
+
+    try:
+        job = BatchJob.objects.get(id=job_id)
+    except BatchJob.DoesNotExist:
+        return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    step_execution_ids = request.data.get('step_execution_ids') or None
+    try:
+        result = resume_job(
+            job,
+            resolve_dispatch_command=_resolve_dispatch_command,
+            dispatch_transport_message=_dispatch_transport_message,
+            can_dispatch_to_device=can_dispatch_to_device,
+            extract_device_id_from_topic=_extract_device_id_from_topic,
+            default_device_id=getattr(settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1'),
+            step_execution_ids=step_execution_ids,
+        )
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({
+        'job_id': job.id,
+        'status': job.status,
+        'resumed_steps': result.resumed_steps,
+        'dispatched_messages': CommandOutboxSerializer(result.dispatched_messages, many=True).data,
+        'failed_steps': result.failed_steps,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+def batch_job_check_timeouts(request, job_id):
+    from .orchestration.service import check_job_timeouts
+
+    try:
+        job = BatchJob.objects.get(id=job_id)
+    except BatchJob.DoesNotExist:
+        return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    result = check_job_timeouts(job)
+    job.refresh_from_db()
+    return Response({
+        'job_id': job.id,
+        'status': job.status,
+        'checked_steps': result.checked_steps,
+        'timed_out_steps': result.timed_out_steps,
     }, status=status.HTTP_200_OK)
 
 

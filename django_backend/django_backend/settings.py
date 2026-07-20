@@ -163,6 +163,10 @@ MQTT_AUTO_RECONNECT_MULTIPLIER = 2
 # 请改成实际 ESP32 的 device_id，例如 esp32_7cdfa1e6d3cc
 MQTT_DEFAULT_DEVICE_ID = os.environ.get('MQTT_DEFAULT_DEVICE_ID', 'esp32_1')
 
+# ROS2 Bridge 相关配置
+ROS2_BRIDGE_BASE_URL = os.environ.get('ROS2_BRIDGE_BASE_URL', 'http://127.0.0.1:9001')
+ROS2_BRIDGE_TIMEOUT_SEC = float(os.environ.get('ROS2_BRIDGE_TIMEOUT_SEC', '5'))
+
 # Channels 相关配置
 CHANNEL_LAYERS = {
     'default': {

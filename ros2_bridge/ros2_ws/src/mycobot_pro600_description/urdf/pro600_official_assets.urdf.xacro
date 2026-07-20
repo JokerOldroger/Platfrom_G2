@@ -1,0 +1,237 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="mycobot_pro600">
+  <xacro:arg name="use_ros2_control" default="true"/>
+
+  <link name="base">
+    <visual>
+      <geometry>
+        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/base.dae"/>
+      </geometry>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.04" rpy="0 0 1.5708"/>
+      <geometry>
+        <cylinder length="0.06" radius="0.038"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.03" iyy="0.03" izz="0.03" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+  </link>
+
+  <link name="link1">
+    <visual>
+      <geometry>
+        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link1.dae"/>
+      </geometry>
+      <origin xyz="0 0 0" rpy="0 0 3.1415926"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 0.0 -0.02" rpy="0 0 1.5708"/>
+      <geometry>
+        <cylinder length="0.05" radius="0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.03" iyy="0.03" izz="0.03" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+  </link>
+
+  <link name="link2">
+    <visual>
+      <geometry>
+        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link2.dae"/>
+      </geometry>
+      <origin xyz="0 0 -0.080" rpy="3.1415926 0 3.1415926"/>
+    </visual>
+    <collision>
+      <origin xyz="0.128 0 -0.125" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder length="0.28" radius="0.024"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.03" iyy="0.03" izz="0.03" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+  </link>
+
+  <link name="link3">
+    <visual>
+      <geometry>
+        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link3.dae"/>
+      </geometry>
+      <origin xyz="0 0 -0.0855" rpy="3.1415926 0 3.1415926"/>
+    </visual>
+    <collision>
+      <origin xyz="0.128 0.0 -0.003" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder length="0.24" radius="0.024"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.03" iyy="0.03" izz="0.03" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+  </link>
+
+  <link name="link4">
+    <visual>
+      <geometry>
+        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link4.dae"/>
+      </geometry>
+      <origin xyz="0 0 0" rpy="0 3.1415926 0"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 -0.01 0.007" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <cylinder length="0.05" radius="0.024"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.03" iyy="0.03" izz="0.03" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+  </link>
+
+  <link name="link5">
+    <visual>
+      <geometry>
+        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link5.dae"/>
+      </geometry>
+      <origin xyz="0 0 0" rpy="0 0 1.5707"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 0.0 -0.015" rpy="0 0 -1.5708"/>
+      <geometry>
+        <cylinder length="0.05" radius="0.028"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.03" iyy="0.03" izz="0.03" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+  </link>
+
+  <link name="link6">
+    <visual>
+      <geometry>
+        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link6.dae"/>
+      </geometry>
+      <material name="grey">
+        <color rgba="0.5 0.5 0.5 1"/>
+      </material>
+      <origin xyz="0.03 0 0" rpy="0 -1.5707 0"/>
+    </visual>
+    <collision>
+      <origin xyz="0.006 0.0 -0.0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder length="0.006" radius="0.026"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.03" iyy="0.03" izz="0.03" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+  </link>
+
+  <joint name="joint2_to_joint1" type="revolute">
+    <axis xyz="0 0 1"/>
+    <limit effort="1000.0" lower="-3.14" upper="3.14159" velocity="2.0"/>
+    <parent link="base"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.19934" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="joint3_to_joint2" type="revolute">
+    <axis xyz="0 0 -1"/>
+    <limit effort="1000.0" lower="-3.14159" upper="3.14159" velocity="2.0"/>
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0" rpy="1.5708 -1.5708 0"/>
+  </joint>
+
+  <joint name="joint4_to_joint3" type="revolute">
+    <axis xyz="0 0 -1"/>
+    <limit effort="1000.0" lower="-2.61" upper="2.618" velocity="2.0"/>
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0.25 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="joint5_to_joint4" type="revolute">
+    <axis xyz="0 0 -1"/>
+    <limit effort="1000.0" lower="-2.9670" upper="2.9670" velocity="2.0"/>
+    <parent link="link3"/>
+    <child link="link4"/>
+    <origin xyz="0.25 0 -0.1091" rpy="0 0 1.5708"/>
+  </joint>
+
+  <joint name="joint6_to_joint5" type="revolute">
+    <axis xyz="0 0 1"/>
+    <limit effort="1000.0" lower="-2.93" upper="2.9321" velocity="2.0"/>
+    <parent link="link4"/>
+    <child link="link5"/>
+    <origin xyz="0 -0.108 0" rpy="1.57080 -1.57080 0"/>
+  </joint>
+
+  <joint name="joint6output_to_joint6" type="revolute">
+    <axis xyz="-1 0 0"/>
+    <limit effort="1000.0" lower="-3.03" upper="3.0368" velocity="2.0"/>
+    <parent link="link5"/>
+    <child link="link6"/>
+    <origin xyz="-0.07586 0 0" rpy="-1.57080 0 0"/>
+  </joint>
+
+  <xacro:if value="$(arg use_ros2_control)">
+    <ros2_control name="GazeboSystem" type="system">
+      <hardware>
+        <plugin>gazebo_ros2_control/GazeboSystem</plugin>
+      </hardware>
+      <joint name="joint2_to_joint1">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint3_to_joint2">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint4_to_joint3">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint5_to_joint4">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint6_to_joint5">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="joint6output_to_joint6">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+    </ros2_control>
+
+    <gazebo>
+      <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control"/>
+    </gazebo>
+  </xacro:if>
+</robot>

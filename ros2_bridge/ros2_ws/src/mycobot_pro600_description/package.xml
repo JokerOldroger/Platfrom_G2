@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mycobot_pro600_description</name>
+  <version>0.1.0</version>
+  <description>myCobot Pro600 ROS2 描述包，提供基础 xacro、RViz 启动与 ROS1 资产导入脚本。</description>
+
+  <maintainer email="devnull@example.com">Platform G2</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>joint_state_publisher_gui</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

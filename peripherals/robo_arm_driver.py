@@ -1,5 +1,5 @@
 from pymycobot import ElephantRobot
-from robo_arm_config import IP_ADDRESS, PORT, CORD_LIST
+from robo_arm_config import IP_ADDRESS, PORT, CORD_LIST, WAYPOINTS
 
 
 class RoboArmControl:
@@ -23,6 +23,13 @@ class RoboArmControl:
         except:
             return 'Fail'
 
+    def to_waypoint(self, waypoint_name, speed=1000):
+        angle_list = WAYPOINTS.get(waypoint_name)
+        if angle_list is None:
+            raise ValueError(f'Unknown waypoint: {waypoint_name}')
+        print(f'[RoboArm] Moving to waypoint: {waypoint_name} -> {angle_list}')
+        return self.to_position(angle_list, speed)
+
     def to_zero(self):
         # print(CORD_LIST['zero'])
         self.to_position(CORD_LIST['zero'], 1000)
@@ -41,6 +48,13 @@ class RoboArmControl:
         for point in route:
             self.to_position(point, speed)
 
+    def run_waypoint_sequence(self, waypoint_names, speed=1000):
+        for waypoint_name in waypoint_names:
+            result = self.to_waypoint(waypoint_name, speed)
+            if result != 'Success':
+                return result
+        return 'Success'
+
     def main_loop(self):
         while self.running:
             cmd = input('>>>')
@@ -55,6 +69,9 @@ class RoboArmControl:
                 self.route(CORD_LIST['route_1'], 1000)
             elif cmd == 'r_2':
                 self.route(CORD_LIST['route_2'], 1500)
+            elif cmd.startswith('goto '):
+                _, waypoint_name = cmd.split(' ', 1)
+                self.to_waypoint(waypoint_name.strip(), 1000)
 
 
 if __name__ == '__main__':

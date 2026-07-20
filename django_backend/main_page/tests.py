@@ -1,6 +1,7 @@
 from rest_framework import status
 from rest_framework.test import APITestCase
 from unittest.mock import patch
+from django.utils import timezone
 
 from .models import (
     ExperimentProcess,
@@ -13,6 +14,10 @@ from .models import (
     TelemetryIngest,
 )
 from .mqtt import process_device_reply_envelope, _ensure_device_state
+from .orchestration.events import DeviceReplyEvent
+from .orchestration.step_executors import default_step_executor_registry
+from .orchestration.service import check_job_timeouts, get_ready_pending_steps
+from .orchestration.transitions import derive_job_status, transition_outbox_status, transition_step_status
 
 
 def _set_default_device_online():
@@ -161,7 +166,8 @@ class RecipeAndJobApiTests(APITestCase):
 
     @patch("main_page.views.publish_device_command")
     @patch("main_page.views.mqtt_client_available", return_value=True)
-    def test_job_start_queues_all_pending_steps_and_outbox(self, _mock_available, mock_publish):
+    @patch("main_page.views.dispatch_ros2_bridge_command", return_value={"accepted": True, "bridge_request_id": "req_job_start"})
+    def test_job_start_queues_all_pending_steps_and_outbox(self, _mock_bridge, _mock_available, mock_publish):
         create_resp = self.client.post("/api/v1/jobs/", {"recipe_id": self.recipe.id}, format="json")
         job_id = create_resp.data["id"]
 
@@ -176,7 +182,8 @@ class RecipeAndJobApiTests(APITestCase):
 
     @patch("main_page.views.publish_device_command")
     @patch("main_page.views.mqtt_client_available", return_value=True)
-    def test_job_status_returns_counts_and_next_step(self, _mock_available, _mock_publish):
+    @patch("main_page.views.dispatch_ros2_bridge_command", return_value={"accepted": True, "bridge_request_id": "req_job_status"})
+    def test_job_status_returns_counts_and_next_step(self, _mock_bridge, _mock_available, _mock_publish):
         create_resp = self.client.post("/api/v1/jobs/", {"recipe_id": self.recipe.id}, format="json")
         job_id = create_resp.data["id"]
         self.client.post(f"/api/v1/jobs/{job_id}/start/", {}, format="json")
@@ -217,6 +224,7 @@ class LegacyCompatibilityTests(APITestCase):
 
 class CommunicationInterfaceApiTests(APITestCase):
     def setUp(self):
+        _set_default_device_online()
         self.material = MaterialType.objects.create(name="ZnO", description="Target material")
         self.recipe = MaterialRecipe.objects.create(
             material_type=self.material,
@@ -294,6 +302,386 @@ class CommunicationInterfaceApiTests(APITestCase):
         self.assertEqual(resp.data["interface_type"], "action")
         published_payload = mock_publish.call_args[0][1]
         self.assertEqual(published_payload["action_name"], "arm.execute_trajectory")
+
+    @patch("main_page.views.dispatch_ros2_bridge_command", return_value={"accepted": True, "bridge_request_id": "req_001"})
+    def test_action_goal_interface_supports_ros2_transport(self, mock_bridge):
+        resp = self.client.post(
+            "/api/v1/communications/actions/goals/",
+            {
+                "topic": "bridge/arm01/actions",
+                "transport": "ros2",
+                "action_name": "arm.execute_trajectory",
+                "goal": {"trajectory": ["safe_a", "pickup", "place_1"]},
+                "step_execution_id": self.step_execution.id,
+                "device": {"type": "roboarm", "id": "arm01"},
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        outbox = CommandOutbox.objects.get(step_execution=self.step_execution)
+        self.assertEqual(outbox.payload["transport"], "ros2")
+        mock_bridge.assert_called_once()
+
+
+class OrchestrationDomainTests(APITestCase):
+    def test_step_transition_ack_from_pending_becomes_queued(self):
+        event = DeviceReplyEvent(interface_type='action', message_type='ack', status='accepted')
+        self.assertEqual(transition_step_status('PENDING', event), 'QUEUED')
+
+    def test_step_transition_result_success_becomes_done(self):
+        event = DeviceReplyEvent(interface_type='action', message_type='result', status='succeeded')
+        self.assertEqual(transition_step_status('RUNNING', event), 'DONE')
+
+    def test_outbox_transition_error_becomes_failed(self):
+        event = DeviceReplyEvent(interface_type='action', message_type='error', status='failed')
+        self.assertEqual(transition_outbox_status('SENT', event), 'FAILED')
+
+    def test_job_status_derives_failed_when_any_step_failed(self):
+        self.assertEqual(derive_job_status(['DONE', 'FAILED'], 'RUNNING'), 'FAILED')
+
+    def test_job_status_derives_done_when_all_steps_done(self):
+        self.assertEqual(derive_job_status(['DONE', 'DONE'], 'RUNNING'), 'DONE')
+
+    def test_step_executor_registry_maps_move_arm_to_ros2_action(self):
+        recipe_step = RecipeStep(
+            step_no=1,
+            step_type='MOVE_ARM',
+            name='Move',
+            parameters={'action_name': 'arm.execute_trajectory', 'goal': {'trajectory': ['home']}},
+        )
+        payload = default_step_executor_registry.build_command_payload(
+            recipe_step,
+            planned_parameters={},
+            default_device_id='esp32_1',
+        )
+        self.assertEqual(payload['transport'], 'ros2')
+        self.assertEqual(payload['interface_type'], 'action')
+
+    def test_step_executor_registry_maps_wait_to_service(self):
+        recipe_step = RecipeStep(
+            step_no=2,
+            step_type='WAIT',
+            name='Wait',
+            parameters={'service_name': 'heater.wait_ready', 'request': {'device_id': 'heater01'}},
+        )
+        payload = default_step_executor_registry.build_command_payload(
+            recipe_step,
+            planned_parameters={},
+            default_device_id='esp32_1',
+        )
+        self.assertEqual(payload['transport'], 'mqtt')
+        self.assertEqual(payload['interface_type'], 'service')
+
+    def test_get_ready_pending_steps_supports_explicit_dependencies(self):
+        material = MaterialType.objects.create(name="Sched", description="Sched")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1)
+        step1 = RecipeStep.objects.create(recipe=recipe, step_no=1, step_type='MOVE_ARM', parameters={})
+        step2 = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=2,
+            step_type='WAIT',
+            parameters={'depends_on_steps': [1], 'service_name': 'heater.wait_ready'},
+        )
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING')
+        exec1 = BatchStepExecution.objects.create(
+            job=job, recipe_step=step1, status='DONE',
+            command_payload={'step_no': 1, 'step_type': 'MOVE_ARM', 'parameters': {}},
+        )
+        exec2 = BatchStepExecution.objects.create(
+            job=job, recipe_step=step2, status='PENDING',
+            command_payload={'step_no': 2, 'step_type': 'WAIT', 'parameters': {'depends_on_steps': [1]}},
+        )
+        ready = get_ready_pending_steps(job)
+        self.assertEqual([step.id for step in ready], [exec2.id])
+
+    def test_timeout_check_pauses_job_and_marks_step_failed(self):
+        material = MaterialType.objects.create(name="Timeout", description="Timeout")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1)
+        step = RecipeStep.objects.create(recipe=recipe, step_no=1, step_type='MOVE_ARM', expected_duration_sec=1)
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING')
+        step_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=step,
+            status='RUNNING',
+            started_at=timezone.now() - __import__('datetime').timedelta(seconds=5),
+            command_payload={'step_no': 1, 'step_type': 'MOVE_ARM', 'parameters': {}},
+        )
+        result = check_job_timeouts(job)
+        self.assertEqual(result.checked_steps, 1)
+        self.assertEqual(len(result.timed_out_steps), 1)
+        step_execution.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(step_execution.status, 'FAILED')
+        self.assertEqual(job.status, 'PAUSED')
+
+    def test_get_ready_pending_steps_respects_active_resource_lock(self):
+        material = MaterialType.objects.create(name="Locks", description="Locks")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1)
+        step1 = RecipeStep.objects.create(
+            recipe=recipe, step_no=1, step_type='MOVE_ARM',
+            parameters={'device': 'roboarm', 'device_id': 'arm01'},
+        )
+        step2 = RecipeStep.objects.create(
+            recipe=recipe, step_no=2, step_type='MOVE_ARM',
+            parameters={'device': 'roboarm', 'device_id': 'arm01'},
+        )
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING')
+        BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=step1,
+            status='RUNNING',
+            command_payload={'step_no': 1, 'step_type': 'MOVE_ARM', 'parameters': {'device': 'roboarm', 'device_id': 'arm01'}},
+        )
+        blocked = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=step2,
+            status='PENDING',
+            command_payload={'step_no': 2, 'step_type': 'MOVE_ARM', 'parameters': {'device': 'roboarm', 'device_id': 'arm01'}},
+        )
+        ready = get_ready_pending_steps(job)
+        self.assertEqual(ready, [])
+        blocked.refresh_from_db()
+        self.assertEqual(blocked.status, 'PENDING')
+
+    def test_get_ready_pending_steps_dispatches_non_conflicting_parallel_steps(self):
+        material = MaterialType.objects.create(name="Parallel", description="Parallel")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1)
+        step1 = RecipeStep.objects.create(
+            recipe=recipe, step_no=1, step_type='MOVE_ARM',
+            parameters={'device': 'roboarm', 'device_id': 'arm01'},
+        )
+        step2 = RecipeStep.objects.create(
+            recipe=recipe, step_no=2, step_type='WAIT',
+            parameters={'service_name': 'heater.wait_ready', 'resource_locks': ['heater:heater01']},
+        )
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING')
+        exec1 = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=step1,
+            status='PENDING',
+            command_payload={'step_no': 1, 'step_type': 'MOVE_ARM', 'parameters': {'device': 'roboarm', 'device_id': 'arm01'}},
+        )
+        exec2 = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=step2,
+            status='PENDING',
+            command_payload={'step_no': 2, 'step_type': 'WAIT', 'parameters': {'resource_locks': ['heater:heater01']}},
+        )
+        ready = get_ready_pending_steps(job)
+        self.assertEqual([step.id for step in ready], [exec1.id, exec2.id])
+
+    def test_get_ready_pending_steps_reserves_same_lock_within_batch(self):
+        material = MaterialType.objects.create(name="Reserve", description="Reserve")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1)
+        step1 = RecipeStep.objects.create(
+            recipe=recipe, step_no=1, step_type='WAIT',
+            parameters={'service_name': 'gripper.close', 'resource_locks': ['gripper:gripper01']},
+        )
+        step2 = RecipeStep.objects.create(
+            recipe=recipe, step_no=2, step_type='WAIT',
+            parameters={'service_name': 'gripper.open', 'resource_locks': ['gripper:gripper01']},
+        )
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING')
+        exec1 = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=step1,
+            status='PENDING',
+            command_payload={'step_no': 1, 'step_type': 'WAIT', 'parameters': {'resource_locks': ['gripper:gripper01']}},
+        )
+        BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=step2,
+            status='PENDING',
+            command_payload={'step_no': 2, 'step_type': 'WAIT', 'parameters': {'resource_locks': ['gripper:gripper01']}},
+        )
+        ready = get_ready_pending_steps(job)
+        self.assertEqual([step.id for step in ready], [exec1.id])
+
+
+class Ros2BridgeIntegrationTests(APITestCase):
+    def setUp(self):
+        self.material = MaterialType.objects.create(name="Bridge Material", description="ROS2 bridge test")
+        self.recipe = MaterialRecipe.objects.create(material_type=self.material, version=1)
+        self.step = RecipeStep.objects.create(
+            recipe=self.recipe,
+            step_no=1,
+            step_type="MOVE_ARM",
+            name="Move by ROS2 bridge",
+            parameters={
+                "transport": "ros2",
+                "device": "roboarm",
+                "device_id": "arm01",
+                "action_name": "arm.execute_trajectory",
+                "goal": {"trajectory": ["safe_a", "pickup", "place_1"]},
+                "expected_duration_sec": 12,
+            },
+        )
+
+    @patch("main_page.views.dispatch_ros2_bridge_command", return_value={"accepted": True, "bridge_request_id": "req_002"})
+    def test_job_start_dispatches_move_arm_via_ros2_bridge(self, mock_bridge):
+        create_resp = self.client.post("/api/v1/jobs/", {"recipe_id": self.recipe.id}, format="json")
+        job_id = create_resp.data["id"]
+
+        start_resp = self.client.post(f"/api/v1/jobs/{job_id}/start/", {}, format="json")
+        self.assertEqual(start_resp.status_code, status.HTTP_200_OK)
+
+        step_execution = BatchStepExecution.objects.get(job_id=job_id)
+        outbox = CommandOutbox.objects.get(step_execution=step_execution)
+        self.assertEqual(step_execution.status, "RUNNING")
+        self.assertEqual(outbox.payload["transport"], "ros2")
+        mock_bridge.assert_called_once()
+
+    @patch("main_page.views.dispatch_ros2_bridge_command", return_value={"accepted": True, "bridge_request_id": "req_resume"})
+    def test_job_resume_requeues_failed_step(self, mock_bridge):
+        job = BatchJob.objects.create(recipe=self.recipe, status="FAILED", error_message="boom")
+        step_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=self.step,
+            status="FAILED",
+            error_message="boom",
+            command_payload={
+                "step_no": 1,
+                "step_type": "MOVE_ARM",
+                "transport": "ros2",
+                "interface_type": "action",
+                "route_name": "arm.execute_trajectory",
+                "parameters": {"transport": "ros2"},
+            },
+        )
+        resp = self.client.post(f"/api/v1/jobs/{job.id}/resume/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        step_execution.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(job.status, "RUNNING")
+        self.assertEqual(step_execution.status, "RUNNING")
+        mock_bridge.assert_called_once()
+
+    def test_bridge_reply_ingest_updates_step_and_job(self):
+        job = BatchJob.objects.create(recipe=self.recipe, status="RUNNING")
+        step_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=self.step,
+            status="RUNNING",
+            command_payload={
+                "step_type": "MOVE_ARM",
+                "transport": "ros2",
+                "interface_type": "action",
+                "route_name": "arm.execute_trajectory",
+                "parameters": {"transport": "ros2"},
+            },
+        )
+        outbox = CommandOutbox.objects.create(
+            job=job,
+            step_execution=step_execution,
+            topic="bridge/arm01/actions",
+            payload={
+                "transport": "ros2",
+                "interface_type": "action",
+                "route_name": "arm.execute_trajectory",
+                "body": {"goal": {"trajectory": ["safe_a", "pickup", "place_1"]}},
+            },
+            status="SENT",
+        )
+
+        resp = self.client.post(
+            "/api/v1/internal/bridge/replies/",
+            {
+                "interface_type": "action",
+                "message_type": "result",
+                "route_name": "arm.execute_trajectory",
+                "status": "succeeded",
+                "device": {"type": "roboarm", "id": "arm01"},
+                "correlation": {
+                    "job_id": job.id,
+                    "step_execution_id": step_execution.id,
+                    "outbox_id": outbox.id,
+                },
+                "result": {"final_pose": "place_1"},
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        job.refresh_from_db()
+        step_execution.refresh_from_db()
+        outbox.refresh_from_db()
+        self.assertEqual(step_execution.status, "DONE")
+        self.assertEqual(job.status, "DONE")
+        self.assertEqual(outbox.status, "ACKED")
+
+    @patch("main_page.mqtt.orchestration_dispatch_transport_message", return_value={"accepted": True, "bridge_request_id": "req_next"})
+    def test_bridge_reply_ingest_advances_next_dependent_step(self, mock_bridge):
+        job = BatchJob.objects.create(recipe=self.recipe, status="RUNNING")
+        first_step = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=self.step,
+            status="RUNNING",
+            command_payload={
+                "step_no": 1,
+                "step_type": "MOVE_ARM",
+                "transport": "ros2",
+                "interface_type": "action",
+                "route_name": "arm.execute_trajectory",
+                "parameters": {"transport": "ros2"},
+            },
+        )
+        second_recipe_step = RecipeStep.objects.create(
+            recipe=self.recipe,
+            step_no=2,
+            step_type="MOVE_ARM",
+            name="Move after first",
+            parameters={
+                "transport": "ros2",
+                "device": "roboarm",
+                "device_id": "arm01",
+                "action_name": "arm.execute_trajectory",
+                "goal": {"trajectory": ["place_1"]},
+                "depends_on_steps": [1],
+            },
+        )
+        second_step = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=second_recipe_step,
+            status="PENDING",
+            command_payload={
+                "step_no": 2,
+                "step_type": "MOVE_ARM",
+                "transport": "ros2",
+                "interface_type": "action",
+                "route_name": "arm.execute_trajectory",
+                "parameters": {
+                    "transport": "ros2",
+                    "depends_on_steps": [1],
+                    "goal": {"trajectory": ["place_1"]},
+                },
+            },
+        )
+        outbox = CommandOutbox.objects.create(
+            job=job,
+            step_execution=first_step,
+            topic="bridge/arm01/actions",
+            payload={"transport": "ros2", "interface_type": "action", "route_name": "arm.execute_trajectory", "body": {}},
+            status="SENT",
+        )
+        resp = self.client.post(
+            "/api/v1/internal/bridge/replies/",
+            {
+                "interface_type": "action",
+                "message_type": "result",
+                "route_name": "arm.execute_trajectory",
+                "status": "succeeded",
+                "device": {"type": "roboarm", "id": "arm01"},
+                "correlation": {
+                    "job_id": job.id,
+                    "step_execution_id": first_step.id,
+                    "outbox_id": outbox.id,
+                },
+                "result": {"final_pose": "place_1"},
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        second_step.refresh_from_db()
+        self.assertEqual(second_step.status, "RUNNING")
 
 
 class DeviceReplyEnvelopeTests(APITestCase):
