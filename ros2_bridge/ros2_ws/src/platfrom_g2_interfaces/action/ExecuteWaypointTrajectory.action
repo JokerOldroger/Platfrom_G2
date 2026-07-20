@@ -1,0 +1,15 @@
+# 目标关节路径点名称列表，例如 ["home", "safe_a", "reactor_hover"]
+string[] trajectory
+
+# ElephantRobot 当前速度参数，先直接沿用现有 socket API 语义
+int32 speed
+
+# 预留：后续可用于任务关联或日志追踪
+string request_id
+---
+bool success
+string message
+string final_waypoint
+---
+float32 percent
+string stage

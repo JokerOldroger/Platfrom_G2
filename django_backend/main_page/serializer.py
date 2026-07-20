@@ -118,7 +118,8 @@ class TopicPublishRequestSerializer(serializers.Serializer):
     payload = serializers.JSONField()
     job_id = serializers.IntegerField(required=False)
     step_execution_id = serializers.IntegerField(required=False)
-    device = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    transport = serializers.ChoiceField(choices=['mqtt', 'ros2'], required=False, default='mqtt')
+    device = serializers.JSONField(required=False)
 
 
 class ServiceCallRequestSerializer(serializers.Serializer):
@@ -128,7 +129,8 @@ class ServiceCallRequestSerializer(serializers.Serializer):
     job_id = serializers.IntegerField(required=False)
     step_execution_id = serializers.IntegerField(required=False)
     timeout_sec = serializers.IntegerField(required=False, min_value=1)
-    device = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    transport = serializers.ChoiceField(choices=['mqtt', 'ros2'], required=False, default='mqtt')
+    device = serializers.JSONField(required=False)
 
 
 class ActionGoalRequestSerializer(serializers.Serializer):
@@ -138,4 +140,5 @@ class ActionGoalRequestSerializer(serializers.Serializer):
     job_id = serializers.IntegerField(required=False)
     step_execution_id = serializers.IntegerField(required=False)
     expected_duration_sec = serializers.IntegerField(required=False, min_value=1)
-    device = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    transport = serializers.ChoiceField(choices=['mqtt', 'ros2'], required=False, default='mqtt')
+    device = serializers.JSONField(required=False)

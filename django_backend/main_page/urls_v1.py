@@ -25,10 +25,13 @@ urlpatterns = [
     path('recipes/<int:recipe_id>/steps/', views.recipe_step_list_create, name='recipe_steps'),
     path('jobs/', views.batch_job_create, name='jobs_create'),
     path('jobs/<int:job_id>/start/', views.batch_job_start, name='jobs_start'),
+    path('jobs/<int:job_id>/resume/', views.batch_job_resume, name='jobs_resume'),
+    path('jobs/<int:job_id>/check-timeouts/', views.batch_job_check_timeouts, name='jobs_check_timeouts'),
     path('jobs/<int:job_id>/status/', views.batch_job_status, name='jobs_status'),
     path('communications/topics/publish/', views.communication_topic_publish, name='communications_topic_publish'),
     path('communications/services/call/', views.communication_service_call, name='communications_service_call'),
     path('communications/actions/goals/', views.communication_action_goal, name='communications_action_goal'),
+    path('internal/bridge/replies/', views.bridge_reply_ingest, name='internal_bridge_replies'),
     path('internal/spinning-metrics/', views.test, name='internal_spinning_metrics'),
 ]
 
