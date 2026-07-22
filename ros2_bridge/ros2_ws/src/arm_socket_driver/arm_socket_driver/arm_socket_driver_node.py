@@ -11,9 +11,12 @@ def _inject_project_root():
     """允许节点直接复用当前仓库里的现有 socket 封装。"""
     current = Path(__file__).resolve()
     for parent in current.parents:
-        if (parent / 'peripherals' / 'robo_arm_driver.py').exists():
+        peripherals_dir = parent / 'peripherals'
+        if (peripherals_dir / 'robo_arm_driver.py').exists():
             if str(parent) not in sys.path:
                 sys.path.insert(0, str(parent))
+            if str(peripherals_dir) not in sys.path:
+                sys.path.insert(0, str(peripherals_dir))
             return parent
     raise RuntimeError(
         'Cannot locate project root containing peripherals/robo_arm_driver.py. '

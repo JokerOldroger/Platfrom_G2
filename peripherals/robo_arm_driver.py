@@ -1,5 +1,8 @@
 from pymycobot import ElephantRobot
-from robo_arm_config import IP_ADDRESS, PORT, CORD_LIST, WAYPOINTS
+try:
+     from .robo_arm_config import IP_ADDRESS, PORT, CORD_LIST, WAYPOINTS
+except ImportError:
+    from robo_arm_config import IP_ADDRESS, PORT, CORD_LIST, WAYPOINTS
 
 
 class RoboArmControl:
@@ -13,14 +16,24 @@ class RoboArmControl:
 
     def to_position(self, angle_list, speed):
         try:
-            self.client.write_angles(angle_list, speed)
-            # 我也不知道他会打印什么东西
-            response = self.client.command_wait_done()
-            print(response)
-            print(self.client.get_coords())
-            print(self.client.get_angles())
+            print(f'[RoboArm] write_angles angle_list={angle_list}, speed={speed}')
+            write_ret = self.client.write_angles(angle_list, speed)
+            print(f'[RoboArm] write_angles ret={write_ret!r}')
+
+            wait_ret = self.client.command_wait_done()
+            print(f'[RoboArm] command_wait_done ret={wait_ret!r}')
+
+            coords = self.client.get_coords()
+            print(f'[RoboArm] coords={coords}')
+
+            angles = self.client.get_angles()
+            print(f'[RoboArm] angles={angles}')
+
             return 'Success'
-        except:
+        except Exception as exc:
+            import traceback
+            print(f'[RoboArm] to_position failed: {exc!r}')
+            traceback.print_exc()
             return 'Fail'
 
     def to_waypoint(self, waypoint_name, speed=1000):
