@@ -1,7 +1,6 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
@@ -14,18 +13,18 @@ import os
 def generate_launch_description():
     description_share = get_package_share_directory('mycobot_pro600_description')
     gazebo_share = get_package_share_directory('mycobot_pro600_gazebo')
-    gazebo_ros_share = get_package_share_directory('gazebo_ros')
+    ros_gz_sim_share = get_package_share_directory('ros_gz_sim')
 
     default_model = os.path.join(description_share, 'urdf', 'pro600_official_assets.urdf.xacro')
     default_world = os.path.join(gazebo_share, 'worlds', 'empty.world')
-    controllers_file = os.path.join(gazebo_share, 'config', 'controllers.yaml')
 
     use_rviz = LaunchConfiguration('use_rviz')
     world = LaunchConfiguration('world')
     model = LaunchConfiguration('model')
 
+    # Jazzy 默认使用 Gazebo Sim / ros_gz，先加载可视化模型，不绑定 classic gazebo_ros2_control。
     robot_description = ParameterValue(
-        Command(['xacro', ' ', model, ' ', 'use_ros2_control:=true']),
+        Command(['xacro', ' ', model, ' ', 'use_ros2_control:=false']),
         value_type=str,
     )
 
@@ -36,43 +35,30 @@ def generate_launch_description():
         parameters=[{'robot_description': robot_description}],
     )
 
-    gazebo_launch = IncludeLaunchDescription(
+    gz_sim_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(gazebo_ros_share, 'launch', 'gazebo.launch.py')
+            os.path.join(ros_gz_sim_share, 'launch', 'gz_sim.launch.py')
         ),
-        launch_arguments={'world': world}.items(),
+        launch_arguments={'gz_args': ['-r ', world]}.items(),
     )
 
     spawn_entity = Node(
-        package='gazebo_ros',
-        executable='spawn_entity.py',
-        output='screen',
-        arguments=['-topic', 'robot_description', '-entity', 'mycobot_pro600'],
-    )
-
-    joint_state_broadcaster = Node(
-        package='controller_manager',
-        executable='spawner',
+        package='ros_gz_sim',
+        executable='create',
         output='screen',
         arguments=[
-            'joint_state_broadcaster',
-            '--controller-manager',
-            '/controller_manager',
-            '--param-file',
-            controllers_file,
-        ],
-    )
-
-    arm_controller = Node(
-        package='controller_manager',
-        executable='spawner',
-        output='screen',
-        arguments=[
-            'arm_controller',
-            '--controller-manager',
-            '/controller_manager',
-            '--param-file',
-            controllers_file,
+            '-topic',
+            'robot_description',
+            '-name',
+            'mycobot_pro600',
+            '-allow_renaming',
+            'true',
+            '-x',
+            '0.0',
+            '-y',
+            '0.0',
+            '-z',
+            '0.05',
         ],
     )
 
@@ -93,7 +79,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'world',
             default_value=default_world,
-            description='Gazebo world 文件路径。',
+            description='Gazebo Sim world 文件路径。',
         ),
         DeclareLaunchArgument(
             'use_rviz',
@@ -101,12 +87,7 @@ def generate_launch_description():
             description='是否同时启动 RViz2。',
         ),
         rsp_node,
-        gazebo_launch,
+        gz_sim_launch,
         spawn_entity,
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=spawn_entity,
-                on_exit=[joint_state_broadcaster, arm_controller, rviz_node],
-            )
-        ),
+        rviz_node,
     ])
