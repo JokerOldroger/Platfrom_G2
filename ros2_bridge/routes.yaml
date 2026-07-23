@@ -3,6 +3,7 @@ routes:
     interface_type: action
     device_type: roboarm
     node: arm01
+    action_topic: /arm01/execute_waypoint_trajectory
   gripper.set_force:
     interface_type: action
     device_type: gripper

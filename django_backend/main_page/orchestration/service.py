@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from django.db import transaction
 from django.utils import timezone
@@ -34,6 +35,14 @@ class TimeoutCheckResult:
     timed_out_steps: list
 
 
+@dataclass
+class WaitCheckResult:
+    checked_steps: int
+    completed_steps: list
+    dispatched_messages: list
+    failed_steps: list
+
+
 def _step_parameters(step_execution):
     return (step_execution.command_payload or {}).get('parameters') or {}
 
@@ -65,6 +74,66 @@ def _step_depends_on(step_execution, step_lookup):
 
 def _is_terminal(status):
     return status in [StepStatus.DONE.value, StepStatus.FAILED.value, StepStatus.SKIPPED.value]
+
+
+def _is_internal_wait_step(step_execution):
+    payload = step_execution.command_payload or {}
+    if payload.get('step_type') != 'WAIT':
+        return False
+    parameters = _step_parameters(step_execution)
+    if parameters.get('service_name') or parameters.get('topic'):
+        return False
+    return any(
+        key in parameters
+        for key in [
+            'wait_strategy',
+            'wait_sec',
+            'duration_sec',
+            'duration_key',
+            'target_angle_deg',
+            'arm_lead_time_sec',
+        ]
+    )
+
+
+def _coerce_float(value, field_name):
+    if value is None or value == '':
+        raise ValueError(f'WAIT step is missing {field_name}.')
+    return float(value)
+
+
+def _planned_value(step_execution, key):
+    payload = step_execution.command_payload or {}
+    planned = payload.get('planned_parameters') or {}
+    return planned.get(key)
+
+
+def _resolve_wait_duration_sec(step_execution):
+    parameters = _step_parameters(step_execution)
+    if parameters.get('wait_sec') is not None:
+        return max(float(parameters.get('wait_sec')), 0.0)
+    if parameters.get('duration_sec') is not None:
+        return max(float(parameters.get('duration_sec')), 0.0)
+    if parameters.get('duration_key'):
+        return max(_coerce_float(_planned_value(step_execution, parameters.get('duration_key')), 'duration_key'), 0.0)
+
+    if parameters.get('wait_strategy') == 'turntable_angle_lead':
+        rpm_key = parameters.get('rpm_key') or parameters.get('speed_key') or 'stirring_speed_rpm'
+        rpm = _coerce_float(_planned_value(step_execution, rpm_key), rpm_key)
+        if rpm <= 0:
+            raise ValueError('WAIT step requires positive rpm for turntable_angle_lead.')
+
+        current_angle = float(parameters.get('current_angle_deg', 0.0) or 0.0)
+        target_angle = _coerce_float(parameters.get('target_angle_deg'), 'target_angle_deg')
+        arm_lead_time = float(parameters.get('arm_lead_time_sec', 0.0) or 0.0)
+        angle_delta = (target_angle - current_angle) % 360.0
+        if angle_delta == 0.0 and parameters.get('full_rotation_when_same_angle'):
+            angle_delta = 360.0
+
+        time_to_target_sec = angle_delta / 360.0 * 60.0 / rpm
+        return max(time_to_target_sec - arm_lead_time, 0.0)
+
+    raise ValueError('WAIT step must define wait_sec, duration_sec, duration_key, or wait_strategy.')
 
 
 def _step_resource_locks(step_execution):
@@ -155,6 +224,9 @@ def _dispatch_single_step(
     extract_device_id_from_topic,
     default_device_id,
 ):
+    if _is_internal_wait_step(step_execution):
+        return _start_internal_wait_step(step_execution)
+
     dispatch = resolve_dispatch_command(step_execution)
 
     if dispatch['transport'] == 'mqtt':
@@ -212,6 +284,33 @@ def _dispatch_single_step(
     return outbox
 
 
+def _start_internal_wait_step(step_execution):
+    now = timezone.now()
+    wait_sec = _resolve_wait_duration_sec(step_execution)
+    wait_until = now + timedelta(seconds=wait_sec)
+    step_execution.status = StepStatus.RUNNING.value
+    step_execution.started_at = now
+    step_execution.error_message = None
+    step_execution.telemetry = {
+        **(step_execution.telemetry or {}),
+        'wait_mode': 'internal',
+        'computed_wait_sec': wait_sec,
+        'wait_until_at': wait_until.isoformat(),
+        'wait_parameters': _step_parameters(step_execution),
+    }
+    if wait_sec <= 0:
+        step_execution.status = StepStatus.DONE.value
+        step_execution.finished_at = now
+        step_execution.telemetry = {
+            **step_execution.telemetry,
+            'wait_completed_at': now.isoformat(),
+        }
+    step_execution.save(
+        update_fields=['status', 'started_at', 'finished_at', 'error_message', 'telemetry', 'updated_at']
+    )
+    return None
+
+
 def dispatch_ready_steps(
     job,
     *,
@@ -236,7 +335,8 @@ def dispatch_ready_steps(
                 extract_device_id_from_topic=extract_device_id_from_topic,
                 default_device_id=default_device_id,
             )
-            dispatched_messages.append(outbox)
+            if outbox is not None:
+                dispatched_messages.append(outbox)
         except Exception as exc:
             step_execution.status = StepStatus.FAILED.value
             step_execution.error_message = str(exc)
@@ -255,6 +355,66 @@ def dispatch_ready_steps(
         job.save(update_fields=['status', 'error_message', 'finished_at', 'updated_at'])
 
     return dispatched_messages, failed_steps
+
+
+def check_internal_waits(
+    job,
+    *,
+    resolve_dispatch_command,
+    dispatch_transport_message,
+    can_dispatch_to_device,
+    extract_device_id_from_topic,
+    default_device_id,
+):
+    now = timezone.now()
+    checked_steps = 0
+    completed_steps = []
+
+    with transaction.atomic():
+        wait_steps = list(BatchStepExecution.objects.filter(job=job, status=StepStatus.RUNNING.value))
+        for step_execution in wait_steps:
+            if not _is_internal_wait_step(step_execution):
+                continue
+            checked_steps += 1
+            wait_until_raw = (step_execution.telemetry or {}).get('wait_until_at')
+            if not wait_until_raw:
+                continue
+            wait_until = datetime.fromisoformat(wait_until_raw)
+            if timezone.is_naive(wait_until):
+                wait_until = timezone.make_aware(wait_until, timezone.get_current_timezone())
+            if now < wait_until:
+                continue
+
+            step_execution.status = StepStatus.DONE.value
+            step_execution.finished_at = now
+            step_execution.error_message = None
+            step_execution.telemetry = {
+                **(step_execution.telemetry or {}),
+                'wait_completed_at': now.isoformat(),
+            }
+            step_execution.save(update_fields=['status', 'finished_at', 'error_message', 'telemetry', 'updated_at'])
+            completed_steps.append({
+                'step_execution_id': step_execution.id,
+                'step_no': step_execution.command_payload.get('step_no'),
+            })
+
+        if completed_steps:
+            sync_job_status(job)
+
+    dispatched_messages, failed_steps = dispatch_ready_steps(
+        job,
+        resolve_dispatch_command=resolve_dispatch_command,
+        dispatch_transport_message=dispatch_transport_message,
+        can_dispatch_to_device=can_dispatch_to_device,
+        extract_device_id_from_topic=extract_device_id_from_topic,
+        default_device_id=default_device_id,
+    )
+    return WaitCheckResult(
+        checked_steps=checked_steps,
+        completed_steps=completed_steps,
+        dispatched_messages=dispatched_messages,
+        failed_steps=failed_steps,
+    )
 
 
 def start_job(

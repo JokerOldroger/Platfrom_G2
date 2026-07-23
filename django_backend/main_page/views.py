@@ -30,7 +30,7 @@ from .mqtt import (
     resolve_dispatchable_device_id, process_device_reply_envelope,
 )
 from .ros2_bridge_client import dispatch_ros2_bridge_command
-from .orchestration.service import start_job
+from .orchestration.service import check_internal_waits, start_job
 from .orchestration.dispatch_runtime import (
     default_device_id as orchestration_default_device_id,
     dispatch_transport_message as orchestration_dispatch_transport_message,
@@ -1101,11 +1101,22 @@ def batch_job_check_timeouts(request, job_id):
     except BatchJob.DoesNotExist:
         return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+    wait_result = check_internal_waits(
+        job,
+        resolve_dispatch_command=_resolve_dispatch_command,
+        dispatch_transport_message=_dispatch_transport_message,
+        can_dispatch_to_device=can_dispatch_to_device,
+        extract_device_id_from_topic=_extract_device_id_from_topic,
+        default_device_id=getattr(settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1'),
+    )
     result = check_job_timeouts(job)
     job.refresh_from_db()
     return Response({
         'job_id': job.id,
         'status': job.status,
+        'completed_wait_steps': wait_result.completed_steps,
+        'wait_dispatched_messages': CommandOutboxSerializer(wait_result.dispatched_messages, many=True).data,
+        'wait_failed_steps': wait_result.failed_steps,
         'checked_steps': result.checked_steps,
         'timed_out_steps': result.timed_out_steps,
     }, status=status.HTTP_200_OK)
@@ -1117,6 +1128,17 @@ def batch_job_status(request, job_id):
         job = BatchJob.objects.get(id=job_id)
     except BatchJob.DoesNotExist:
         return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if job.status == 'RUNNING':
+        check_internal_waits(
+            job,
+            resolve_dispatch_command=_resolve_dispatch_command,
+            dispatch_transport_message=_dispatch_transport_message,
+            can_dispatch_to_device=can_dispatch_to_device,
+            extract_device_id_from_topic=_extract_device_id_from_topic,
+            default_device_id=getattr(settings, 'MQTT_DEFAULT_DEVICE_ID', 'esp32_1'),
+        )
+        job.refresh_from_db()
 
     step_qs = BatchStepExecution.objects.filter(job=job)
     step_status_counts = {

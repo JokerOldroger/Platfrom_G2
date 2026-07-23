@@ -1,7 +1,9 @@
 from pymycobot import ElephantRobot
+
 try:
-     from .robo_arm_config import IP_ADDRESS, PORT, CORD_LIST, WAYPOINTS
+    from .robo_arm_config import IP_ADDRESS, PORT, CORD_LIST, WAYPOINTS
 except ImportError:
+    # 兼容直接在 peripherals 目录下执行脚本的旧用法。
     from robo_arm_config import IP_ADDRESS, PORT, CORD_LIST, WAYPOINTS
 
 
@@ -13,7 +15,6 @@ class RoboArmControl:
 
     def end(self):
         self.client.stop_client()
-
     def to_position(self, angle_list, speed):
         try:
             print(f'[RoboArm] write_angles angle_list={angle_list}, speed={speed}')

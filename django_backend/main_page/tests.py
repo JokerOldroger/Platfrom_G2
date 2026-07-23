@@ -14,9 +14,10 @@ from .models import (
     TelemetryIngest,
 )
 from .mqtt import process_device_reply_envelope, _ensure_device_state
+from .views import _dispatch_transport_message
 from .orchestration.events import DeviceReplyEvent
 from .orchestration.step_executors import default_step_executor_registry
-from .orchestration.service import check_job_timeouts, get_ready_pending_steps
+from .orchestration.service import check_internal_waits, check_job_timeouts, get_ready_pending_steps
 from .orchestration.transitions import derive_job_status, transition_outbox_status, transition_step_status
 
 
@@ -496,6 +497,123 @@ class OrchestrationDomainTests(APITestCase):
         )
         ready = get_ready_pending_steps(job)
         self.assertEqual([step.id for step in ready], [exec1.id])
+
+    def test_internal_wait_computes_turntable_angle_lead_duration(self):
+        material = MaterialType.objects.create(name="AngleWait", description="Angle wait")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1, stirring_speed_rpm=6)
+        wait_step = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=1,
+            step_type='WAIT',
+            parameters={
+                'wait_strategy': 'turntable_angle_lead',
+                'rpm_key': 'stirring_speed_rpm',
+                'target_angle_deg': 180,
+                'arm_lead_time_sec': 2,
+            },
+        )
+        job = BatchJob.objects.create(
+            recipe=recipe,
+            status='RUNNING',
+            planned_parameters={'stirring_speed_rpm': 6},
+        )
+        step_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=wait_step,
+            status='PENDING',
+            command_payload={
+                'step_no': 1,
+                'step_type': 'WAIT',
+                'parameters': wait_step.parameters,
+                'planned_parameters': job.planned_parameters,
+            },
+        )
+
+        from .orchestration.service import dispatch_ready_steps
+
+        dispatched, failed = dispatch_ready_steps(
+            job,
+            resolve_dispatch_command=lambda _step: None,
+            dispatch_transport_message=lambda **_kwargs: {'accepted': True},
+            can_dispatch_to_device=lambda _device_id: (True, ''),
+            extract_device_id_from_topic=lambda _topic: 'esp32_1',
+            default_device_id='esp32_1',
+        )
+        self.assertEqual(dispatched, [])
+        self.assertEqual(failed, [])
+        step_execution.refresh_from_db()
+        self.assertEqual(step_execution.status, 'RUNNING')
+        self.assertAlmostEqual(step_execution.telemetry['computed_wait_sec'], 3.0)
+        self.assertIn('wait_until_at', step_execution.telemetry)
+
+    @patch("main_page.views.dispatch_ros2_bridge_command", return_value={"accepted": True, "bridge_request_id": "req_wait_arm"})
+    def test_internal_wait_completion_dispatches_dependent_move_arm(self, mock_bridge):
+        material = MaterialType.objects.create(name="WaitAdvance", description="Wait advance")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1, stirring_speed_rpm=6)
+        wait_step = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=1,
+            step_type='WAIT',
+            parameters={'wait_sec': 1},
+        )
+        arm_step = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=2,
+            step_type='MOVE_ARM',
+            parameters={
+                'transport': 'ros2',
+                'device': 'roboarm',
+                'device_id': 'arm01',
+                'action_name': 'arm.execute_trajectory',
+                'goal': {'trajectory': ['reactor_hover']},
+                'depends_on_steps': [1],
+            },
+        )
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING', planned_parameters={'stirring_speed_rpm': 6})
+        wait_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=wait_step,
+            status='RUNNING',
+            started_at=timezone.now() - __import__('datetime').timedelta(seconds=2),
+            command_payload={'step_no': 1, 'step_type': 'WAIT', 'parameters': wait_step.parameters},
+            telemetry={
+                'wait_mode': 'internal',
+                'computed_wait_sec': 1,
+                'wait_until_at': (timezone.now() - __import__('datetime').timedelta(seconds=1)).isoformat(),
+            },
+        )
+        arm_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=arm_step,
+            status='PENDING',
+            command_payload={
+                'step_no': 2,
+                'step_type': 'MOVE_ARM',
+                'transport': 'ros2',
+                'interface_type': 'action',
+                'route_name': 'arm.execute_trajectory',
+                'parameters': arm_step.parameters,
+            },
+        )
+
+        result = check_internal_waits(
+            job,
+            resolve_dispatch_command=lambda step: default_step_executor_registry.resolve_dispatch(
+                step,
+                default_control_topic='esp32_1/control',
+            ),
+            dispatch_transport_message=_dispatch_transport_message,
+            can_dispatch_to_device=lambda _device_id: (True, ''),
+            extract_device_id_from_topic=lambda _topic: 'esp32_1',
+            default_device_id='esp32_1',
+        )
+        wait_execution.refresh_from_db()
+        arm_execution.refresh_from_db()
+        self.assertEqual(result.checked_steps, 1)
+        self.assertEqual(len(result.completed_steps), 1)
+        self.assertEqual(wait_execution.status, 'DONE')
+        self.assertEqual(arm_execution.status, 'RUNNING')
+        mock_bridge.assert_called_once()
 
 
 class Ros2BridgeIntegrationTests(APITestCase):
