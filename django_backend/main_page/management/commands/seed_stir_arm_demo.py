@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand
 
+from main_page.mqtt import _device_control_topic
 from main_page.models import MaterialRecipe, MaterialType, RecipeStep
 
 
@@ -9,14 +10,17 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--material-name', default='StirArmDemo')
         parser.add_argument('--recipe-version', type=int, default=1)
+        parser.add_argument('--esp32-device-id', default='esp32_7cdfa1e6d3cc')
         parser.add_argument('--motor-id', type=int, default=1)
-        parser.add_argument('--motor-topic', default='esp32_1/control')
+        parser.add_argument('--motor-topic', default=None)
         parser.add_argument('--stirring-speed-rpm', type=int, default=60)
         parser.add_argument('--fixed-rotations', type=float, default=1.0)
         parser.add_argument('--hover-waypoint', default='reactor_hover')
         parser.add_argument('--arm-device-id', default='arm01')
 
     def handle(self, *args, **options):
+        esp32_device_id = options['esp32_device_id']
+        motor_topic = options['motor_topic'] or _device_control_topic(esp32_device_id)
         material, _created = MaterialType.objects.update_or_create(
             name=options['material_name'],
             defaults={
@@ -43,9 +47,9 @@ class Command(BaseCommand):
                 'name': 'Run stir chamber fixed rotations',
                 'expected_duration_sec': None,
                 'parameters': {
-                    'topic': options['motor_topic'],
+                    'topic': motor_topic,
                     'device': 'esp32',
-                    'device_id': 'esp32_1',
+                    'device_id': esp32_device_id,
                     'motor': options['motor_id'],
                     'speed_key': 'stirring_speed_rpm',
                     'fixed_rotations': options['fixed_rotations'],
@@ -74,6 +78,8 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f'Created/updated demo recipe id={recipe.id}, material={material.name}, version={recipe.version}.'
+                'Created/updated demo recipe '
+                f'id={recipe.id}, material={material.name}, version={recipe.version}, '
+                f'esp32_device_id={esp32_device_id}, motor_topic={motor_topic}.'
             )
         )
