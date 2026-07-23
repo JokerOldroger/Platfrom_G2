@@ -17,7 +17,12 @@ from .mqtt import process_device_reply_envelope, _ensure_device_state
 from .views import _dispatch_transport_message
 from .orchestration.events import DeviceReplyEvent
 from .orchestration.step_executors import default_step_executor_registry
-from .orchestration.service import check_internal_waits, check_job_timeouts, get_ready_pending_steps
+from .orchestration.service import (
+    check_internal_waits,
+    check_job_timeouts,
+    check_timed_device_steps,
+    get_ready_pending_steps,
+)
 from .orchestration.transitions import derive_job_status, transition_outbox_status, transition_step_status
 
 
@@ -612,6 +617,116 @@ class OrchestrationDomainTests(APITestCase):
         self.assertEqual(result.checked_steps, 1)
         self.assertEqual(len(result.completed_steps), 1)
         self.assertEqual(wait_execution.status, 'DONE')
+        self.assertEqual(arm_execution.status, 'RUNNING')
+        mock_bridge.assert_called_once()
+
+    def test_motor_step_resolves_fixed_rotations_to_duration_payload(self):
+        material = MaterialType.objects.create(name="FixedRotate", description="Fixed rotate")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1, stirring_speed_rpm=30)
+        stir_step = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=1,
+            step_type='STIR',
+            parameters={
+                'topic': 'esp32_1/control',
+                'motor': 1,
+                'rpm_key': 'stirring_speed_rpm',
+                'fixed_rotations': 3,
+            },
+        )
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING', planned_parameters={'stirring_speed_rpm': 30})
+        step_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=stir_step,
+            status='PENDING',
+            command_payload={
+                'step_no': 1,
+                'step_type': 'STIR',
+                'parameters': stir_step.parameters,
+                'planned_parameters': job.planned_parameters,
+            },
+        )
+
+        dispatch = default_step_executor_registry.resolve_dispatch(step_execution, default_control_topic='esp32_1/control')
+        self.assertEqual(dispatch['payload'], 'cmd_1_30_6')
+
+    @patch("main_page.views.dispatch_ros2_bridge_command", return_value={"accepted": True, "bridge_request_id": "req_stir_arm"})
+    def test_timed_stir_completion_dispatches_dependent_move_arm(self, mock_bridge):
+        material = MaterialType.objects.create(name="StirArmDemo", description="Stir arm demo")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1, stirring_speed_rpm=60)
+        stir_step = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=1,
+            step_type='STIR',
+            parameters={
+                'topic': 'esp32_1/control',
+                'motor': 1,
+                'speed_key': 'stirring_speed_rpm',
+                'fixed_rotations': 1,
+                'resource_locks': ['stir_chamber:chamber01'],
+            },
+        )
+        arm_step = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=2,
+            step_type='MOVE_ARM',
+            parameters={
+                'transport': 'ros2',
+                'device': 'roboarm',
+                'device_id': 'arm01',
+                'action_name': 'arm.execute_trajectory',
+                'goal': {'trajectory': ['reactor_hover']},
+                'depends_on_steps': [1],
+            },
+        )
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING', planned_parameters={'stirring_speed_rpm': 60})
+        stir_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=stir_step,
+            status='RUNNING',
+            started_at=timezone.now() - __import__('datetime').timedelta(seconds=2),
+            command_payload={
+                'step_no': 1,
+                'step_type': 'STIR',
+                'parameters': stir_step.parameters,
+                'planned_parameters': job.planned_parameters,
+            },
+            telemetry={
+                'timed_completion_mode': 'duration_after_dispatch',
+                'computed_duration_sec': 1,
+                'timed_done_at': (timezone.now() - __import__('datetime').timedelta(seconds=1)).isoformat(),
+            },
+        )
+        arm_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=arm_step,
+            status='PENDING',
+            command_payload={
+                'step_no': 2,
+                'step_type': 'MOVE_ARM',
+                'transport': 'ros2',
+                'interface_type': 'action',
+                'route_name': 'arm.execute_trajectory',
+                'parameters': arm_step.parameters,
+            },
+        )
+
+        result = check_timed_device_steps(
+            job,
+            resolve_dispatch_command=lambda step: default_step_executor_registry.resolve_dispatch(
+                step,
+                default_control_topic='esp32_1/control',
+            ),
+            dispatch_transport_message=_dispatch_transport_message,
+            can_dispatch_to_device=lambda _device_id: (True, ''),
+            extract_device_id_from_topic=lambda _topic: 'esp32_1',
+            default_device_id='esp32_1',
+        )
+        stir_execution.refresh_from_db()
+        arm_execution.refresh_from_db()
+        self.assertEqual(result.checked_steps, 1)
+        self.assertEqual(len(result.completed_steps), 1)
+        self.assertEqual(stir_execution.status, 'DONE')
         self.assertEqual(arm_execution.status, 'RUNNING')
         mock_bridge.assert_called_once()
 

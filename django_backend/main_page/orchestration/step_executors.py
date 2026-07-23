@@ -40,6 +40,12 @@ def coerce_positive_int(value, default=None):
     return max(int(float(value)), 0)
 
 
+def coerce_positive_float(value, default=None):
+    if value is None or value == '':
+        return default
+    return max(float(value), 0.0)
+
+
 def normalize_device_descriptor(parameters):
     device = parameters.get('device')
     if isinstance(device, dict):
@@ -114,6 +120,16 @@ class MotorStepExecutor(StepExecutor):
         duration = parameters.get('duration_sec')
         if duration is None and parameters.get('duration_key'):
             duration = planned.get(parameters.get('duration_key'))
+        if duration is None:
+            rotations = (
+                parameters.get('rotation_count')
+                or parameters.get('fixed_rotations')
+                or parameters.get('revolutions')
+            )
+            rotations = coerce_positive_float(rotations)
+            speed_for_duration = coerce_positive_float(speed)
+            if rotations is not None and speed_for_duration and speed_for_duration > 0:
+                duration = rotations / speed_for_duration * 60.0
         if duration is None:
             duration_min = planned.get('stirring_duration_min')
             if duration_min is not None:

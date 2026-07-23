@@ -43,6 +43,14 @@ class WaitCheckResult:
     failed_steps: list
 
 
+@dataclass
+class TimedStepCheckResult:
+    checked_steps: int
+    completed_steps: list
+    dispatched_messages: list
+    failed_steps: list
+
+
 def _step_parameters(step_execution):
     return (step_execution.command_payload or {}).get('parameters') or {}
 
@@ -96,6 +104,26 @@ def _is_internal_wait_step(step_execution):
     )
 
 
+def _is_timed_device_step(step_execution):
+    payload = step_execution.command_payload or {}
+    if payload.get('step_type') not in ['STIR', 'DISPENSE']:
+        return False
+    parameters = _step_parameters(step_execution)
+    if parameters.get('disable_auto_complete'):
+        return False
+    return any(
+        key in parameters
+        for key in [
+            'auto_complete_after_dispatch',
+            'duration_sec',
+            'duration_key',
+            'rotation_count',
+            'fixed_rotations',
+            'revolutions',
+        ]
+    ) or _planned_value(step_execution, 'stirring_duration_min') is not None
+
+
 def _coerce_float(value, field_name):
     if value is None or value == '':
         raise ValueError(f'WAIT step is missing {field_name}.')
@@ -134,6 +162,35 @@ def _resolve_wait_duration_sec(step_execution):
         return max(time_to_target_sec - arm_lead_time, 0.0)
 
     raise ValueError('WAIT step must define wait_sec, duration_sec, duration_key, or wait_strategy.')
+
+
+def _resolve_timed_device_duration_sec(step_execution):
+    parameters = _step_parameters(step_execution)
+    if parameters.get('duration_sec') is not None:
+        return max(float(parameters.get('duration_sec')), 0.0)
+    if parameters.get('duration_key'):
+        return max(_coerce_float(_planned_value(step_execution, parameters.get('duration_key')), 'duration_key'), 0.0)
+
+    rotations = (
+        parameters.get('rotation_count')
+        or parameters.get('fixed_rotations')
+        or parameters.get('revolutions')
+    )
+    if rotations is not None:
+        speed_key = parameters.get('rpm_key') or parameters.get('speed_key') or 'stirring_speed_rpm'
+        rpm = parameters.get('speed')
+        if rpm is None:
+            rpm = _planned_value(step_execution, speed_key)
+        rpm = _coerce_float(rpm, speed_key)
+        if rpm <= 0:
+            raise ValueError('Timed motor step requires positive rpm for fixed rotations.')
+        return max(_coerce_float(rotations, 'rotation_count') / rpm * 60.0, 0.0)
+
+    duration_min = _planned_value(step_execution, 'stirring_duration_min')
+    if duration_min is not None:
+        return max(float(duration_min) * 60.0, 0.0)
+
+    raise ValueError('Timed motor step must define duration_sec, duration_key, rotations, or stirring_duration_min.')
 
 
 def _step_resource_locks(step_execution):
@@ -235,6 +292,10 @@ def _dispatch_single_step(
         if not ok:
             raise ValueError(reason)
 
+    timed_duration_sec = None
+    if _is_timed_device_step(step_execution):
+        timed_duration_sec = _resolve_timed_device_duration_sec(step_execution)
+
     outbox = CommandOutbox.objects.create(
         job=job,
         step_execution=step_execution,
@@ -280,6 +341,15 @@ def _dispatch_single_step(
         'dispatch_interface_type': dispatch.get('interface_type'),
         'dispatch_route_name': dispatch.get('route_name'),
     }
+    if timed_duration_sec is not None:
+        timed_done_at = step_execution.started_at + timedelta(seconds=timed_duration_sec)
+        step_execution.telemetry = {
+            **step_execution.telemetry,
+            'timed_completion_mode': 'duration_after_dispatch',
+            'computed_duration_sec': timed_duration_sec,
+            'timed_done_at': timed_done_at.isoformat(),
+            'timed_completion_parameters': _step_parameters(step_execution),
+        }
     step_execution.save(update_fields=['status', 'started_at', 'error_message', 'telemetry', 'updated_at'])
     return outbox
 
@@ -410,6 +480,69 @@ def check_internal_waits(
         default_device_id=default_device_id,
     )
     return WaitCheckResult(
+        checked_steps=checked_steps,
+        completed_steps=completed_steps,
+        dispatched_messages=dispatched_messages,
+        failed_steps=failed_steps,
+    )
+
+
+def check_timed_device_steps(
+    job,
+    *,
+    resolve_dispatch_command,
+    dispatch_transport_message,
+    can_dispatch_to_device,
+    extract_device_id_from_topic,
+    default_device_id,
+):
+    now = timezone.now()
+    checked_steps = 0
+    completed_steps = []
+
+    with transaction.atomic():
+        timed_steps = list(BatchStepExecution.objects.filter(job=job, status=StepStatus.RUNNING.value))
+        for step_execution in timed_steps:
+            if not _is_timed_device_step(step_execution):
+                continue
+            checked_steps += 1
+            timed_done_at_raw = (step_execution.telemetry or {}).get('timed_done_at')
+            if not timed_done_at_raw:
+                duration_sec = _resolve_timed_device_duration_sec(step_execution)
+                started_at = step_execution.started_at or now
+                timed_done_at = started_at + timedelta(seconds=duration_sec)
+            else:
+                timed_done_at = datetime.fromisoformat(timed_done_at_raw)
+                if timezone.is_naive(timed_done_at):
+                    timed_done_at = timezone.make_aware(timed_done_at, timezone.get_current_timezone())
+            if now < timed_done_at:
+                continue
+
+            step_execution.status = StepStatus.DONE.value
+            step_execution.finished_at = now
+            step_execution.error_message = None
+            step_execution.telemetry = {
+                **(step_execution.telemetry or {}),
+                'timed_completed_at': now.isoformat(),
+            }
+            step_execution.save(update_fields=['status', 'finished_at', 'error_message', 'telemetry', 'updated_at'])
+            completed_steps.append({
+                'step_execution_id': step_execution.id,
+                'step_no': step_execution.command_payload.get('step_no'),
+            })
+
+        if completed_steps:
+            sync_job_status(job)
+
+    dispatched_messages, failed_steps = dispatch_ready_steps(
+        job,
+        resolve_dispatch_command=resolve_dispatch_command,
+        dispatch_transport_message=dispatch_transport_message,
+        can_dispatch_to_device=can_dispatch_to_device,
+        extract_device_id_from_topic=extract_device_id_from_topic,
+        default_device_id=default_device_id,
+    )
+    return TimedStepCheckResult(
         checked_steps=checked_steps,
         completed_steps=completed_steps,
         dispatched_messages=dispatched_messages,
