@@ -8,7 +8,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--material-name', default='StirArmDemo')
-        parser.add_argument('--version', type=int, default=1)
+        parser.add_argument('--recipe-version', type=int, default=1)
         parser.add_argument('--motor-id', type=int, default=1)
         parser.add_argument('--motor-topic', default='esp32_1/control')
         parser.add_argument('--stirring-speed-rpm', type=int, default=60)
@@ -26,7 +26,7 @@ class Command(BaseCommand):
         )
         recipe, _created = MaterialRecipe.objects.update_or_create(
             material_type=material,
-            version=options['version'],
+            version=options['recipe_version'],
             defaults={
                 'is_active': True,
                 'notes': 'Auto-seeded demo: fixed motor rotations, then arm hover waypoint.',
