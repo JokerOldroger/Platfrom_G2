@@ -59,6 +59,7 @@
 
         <div class="field">
             <label class="label">Override Temperature (deg C)</label>
+            <p class="help-text">Optional chemistry parameter. Device routing remains defined by the backend recipe.</p>
             <div class="control">
                 <input
                     class="input"
@@ -73,6 +74,7 @@
 
         <div class="field">
             <label class="label">Override Stirring Speed (rpm)</label>
+            <p class="help-text">Leave blank to use the seeded value, for example StirArmDemo v1 uses 800 rpm.</p>
             <div class="control">
                 <input
                     class="input"
@@ -197,6 +199,13 @@ export default {
 
 .mode-switch__button {
     min-width: 112px;
+}
+
+.help-text {
+    margin: -0.2rem 0 0.45rem;
+    color: #64748b;
+    font-size: 0.78rem;
+    line-height: 1.35;
 }
 
 .command-actions {

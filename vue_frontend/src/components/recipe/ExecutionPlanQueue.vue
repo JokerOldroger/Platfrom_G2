@@ -4,7 +4,8 @@
             <span>Step</span>
             <span>Type</span>
             <span>Interface</span>
-            <span>Target Topic</span>
+            <span>Target</span>
+            <span>Seeded Action</span>
             <span>Parameters</span>
         </div>
         <article class="queue-row" v-for="step in steps" :key="step.id">
@@ -18,7 +19,8 @@
                     {{ resolveStepInterface(step) }}
                 </span>
             </div>
-            <div class="queue-cell queue-cell--mono">{{ step.parameters?.topic || 'robot/actions' }}</div>
+            <div class="queue-cell queue-cell--mono">{{ resolveStepTarget(step) }}</div>
+            <div class="queue-cell">{{ summariseSeededAction(step) }}</div>
             <div class="queue-cell">
                 <pre>{{ formatParameters(step.parameters) }}</pre>
             </div>
@@ -58,6 +60,36 @@ export default {
             }
             return 'topic'
         },
+        resolveStepTarget(step) {
+            const parameters = step.parameters || {}
+            return parameters.topic
+                || parameters.action_name
+                || parameters.route_name
+                || parameters.device_id
+                || 'backend-managed route'
+        },
+        summariseSeededAction(step) {
+            const parameters = step.parameters || {}
+            if (step.step_type === 'STIR') {
+                const speed = parameters.speed_key ? `speed=${parameters.speed_key}` : 'speed=recipe default'
+                const duration = parameters.duration_sec != null
+                    ? `duration=${parameters.duration_sec}s`
+                    : parameters.fixed_rotations != null
+                        ? `rotations=${parameters.fixed_rotations}`
+                        : 'duration=backend computed'
+                return `motor=${parameters.motor || 'n/a'} · ${speed} · ${duration}`
+            }
+            if (step.step_type === 'MOVE_ARM') {
+                const trajectory = parameters.goal?.trajectory || []
+                return `arm=${parameters.device_id || 'n/a'} · waypoint=${trajectory.join(' -> ') || 'n/a'}`
+            }
+            if (step.step_type === 'WAIT') {
+                return parameters.wait_until || parameters.duration_sec
+                    ? `wait=${parameters.wait_until || `${parameters.duration_sec}s`}`
+                    : 'backend wait'
+            }
+            return parameters.device_id ? `device=${parameters.device_id}` : 'backend step'
+        },
         interfaceBadgeClass(interfaceType) {
             return `interface-badge--${interfaceType || 'topic'}`
         }
@@ -75,7 +107,7 @@ export default {
 .queue-table__head,
 .queue-row {
     display: grid;
-    grid-template-columns: 0.9fr 0.7fr 0.7fr 1fr 1.5fr;
+    grid-template-columns: 0.9fr 0.65fr 0.7fr 1fr 1.1fr 1.5fr;
     gap: 0.75rem;
     align-items: start;
     padding: 0.95rem 1rem;

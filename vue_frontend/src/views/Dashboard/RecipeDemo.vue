@@ -122,6 +122,10 @@ export default {
     },
     data() {
         return {
+            demoDefaults: {
+                materialName: 'StirArmDemo',
+                recipeVersion: 1
+            },
             formModel: {
                 inputMode: 'material',
                 selectedMaterialId: '',
@@ -263,6 +267,10 @@ export default {
             try {
                 const response = await jobsApi.getJobStatus(this.createdJob.id)
                 this.jobStatus = response.data
+                const status = response.data?.job?.status
+                if (['DONE', 'FAILED', 'ABORTED'].includes(status)) {
+                    this.stopStatusPolling()
+                }
             } catch (error) {
                 console.log(error)
             }
@@ -275,13 +283,41 @@ export default {
                 ])
                 this.materials = materialsResponse.data
                 this.recipes = recipesResponse.data
+                await this.selectSeededDemoRecipe()
             } catch (error) {
                 this.errorMessage = 'Failed to load material or recipe data from the backend.'
                 console.log(error)
             }
         },
+        async selectSeededDemoRecipe() {
+            if (this.formModel.selectedRecipeId || !this.recipes.length) {
+                return
+            }
+
+            const material = this.materials.find(item => item.name === this.demoDefaults.materialName)
+            const matchedRecipe = this.recipes.find(recipe => (
+                recipe.material_type === material?.id
+                && Number(recipe.version) === this.demoDefaults.recipeVersion
+            ))
+
+            if (!material || !matchedRecipe) {
+                this.formMessage = 'Load or seed StirArmDemo v1 before running the motor-arm closed-loop demo.'
+                return
+            }
+
+            this.formModel = {
+                ...this.formModel,
+                inputMode: 'recipe',
+                selectedMaterialId: material.id,
+                selectedRecipeId: matchedRecipe.id
+            }
+            this.formMessage = 'StirArmDemo v1 selected from backend seed data. Resolve the plan before creating a job.'
+            await this.previewPlan()
+        },
         onMaterialChange(materialId) {
-            const matchedRecipe = this.recipes.find(recipe => recipe.material_type === Number(materialId))
+            const matchedRecipe = this.recipes
+                .filter(recipe => recipe.material_type === Number(materialId))
+                .sort((left, right) => Number(right.version) - Number(left.version) || right.id - left.id)[0]
             this.formModel.selectedRecipeId = matchedRecipe ? matchedRecipe.id : ''
             this.steps = []
             this.previewParameters = {}
