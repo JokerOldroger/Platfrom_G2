@@ -24,6 +24,7 @@ from .orchestration.service import (
     check_timed_device_steps,
     get_ready_pending_steps,
 )
+from .orchestration.scheduler import OrchestrationScheduler
 from .orchestration.transitions import derive_job_status, transition_outbox_status, transition_step_status
 
 
@@ -727,6 +728,78 @@ class OrchestrationDomainTests(APITestCase):
         arm_execution.refresh_from_db()
         self.assertEqual(result.checked_steps, 1)
         self.assertEqual(len(result.completed_steps), 1)
+        self.assertEqual(stir_execution.status, 'DONE')
+        self.assertEqual(arm_execution.status, 'RUNNING')
+        mock_bridge.assert_called_once()
+
+    @patch("main_page.ros2_bridge_client.dispatch_ros2_bridge_command", return_value={"accepted": True, "bridge_request_id": "req_scheduler"})
+    def test_orchestration_scheduler_advances_timed_stir_without_status_poll(self, mock_bridge):
+        material = MaterialType.objects.create(name="SchedulerStirArmDemo", description="Scheduler stir arm demo")
+        recipe = MaterialRecipe.objects.create(material_type=material, version=1, stirring_speed_rpm=800)
+        stir_step = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=1,
+            step_type='STIR',
+            parameters={
+                'topic': 'esp32/7cdfa1e6d3cc/control',
+                'device': 'esp32',
+                'device_id': 'esp32_7cdfa1e6d3cc',
+                'motor': 2,
+                'speed_key': 'stirring_speed_rpm',
+                'duration_sec': 1,
+                'resource_locks': ['stir_chamber:chamber01'],
+            },
+        )
+        arm_step = RecipeStep.objects.create(
+            recipe=recipe,
+            step_no=2,
+            step_type='MOVE_ARM',
+            parameters={
+                'transport': 'ros2',
+                'device': 'roboarm',
+                'device_id': 'arm01',
+                'action_name': 'arm.execute_trajectory',
+                'goal': {'trajectory': ['home']},
+                'depends_on_steps': [1],
+                'resource_locks': ['roboarm:arm01'],
+            },
+        )
+        job = BatchJob.objects.create(recipe=recipe, status='RUNNING', planned_parameters={'stirring_speed_rpm': 800})
+        stir_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=stir_step,
+            status='RUNNING',
+            started_at=timezone.now() - __import__('datetime').timedelta(seconds=2),
+            command_payload={
+                'step_no': 1,
+                'step_type': 'STIR',
+                'parameters': stir_step.parameters,
+                'planned_parameters': job.planned_parameters,
+            },
+            telemetry={
+                'timed_completion_mode': 'duration_after_dispatch',
+                'computed_duration_sec': 1,
+                'timed_done_at': (timezone.now() - __import__('datetime').timedelta(seconds=1)).isoformat(),
+            },
+        )
+        arm_execution = BatchStepExecution.objects.create(
+            job=job,
+            recipe_step=arm_step,
+            status='PENDING',
+            command_payload={
+                'step_no': 2,
+                'step_type': 'MOVE_ARM',
+                'transport': 'ros2',
+                'interface_type': 'action',
+                'route_name': 'arm.execute_trajectory',
+                'parameters': arm_step.parameters,
+            },
+        )
+
+        OrchestrationScheduler.process_job(job)
+
+        stir_execution.refresh_from_db()
+        arm_execution.refresh_from_db()
         self.assertEqual(stir_execution.status, 'DONE')
         self.assertEqual(arm_execution.status, 'RUNNING')
         mock_bridge.assert_called_once()
