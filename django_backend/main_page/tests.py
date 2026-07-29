@@ -12,8 +12,9 @@ from .models import (
     BatchStepExecution,
     CommandOutbox,
     TelemetryIngest,
+    ExperimentDataPoint,
 )
-from .mqtt import process_device_reply_envelope, _ensure_device_state
+from .mqtt import process_device_reply_envelope, _ensure_device_state, _record_experiment_telemetry, _record_legacy_telemetry
 from .views import _dispatch_transport_message
 from .orchestration.events import DeviceReplyEvent
 from .orchestration.step_executors import default_step_executor_registry
@@ -1028,3 +1029,90 @@ class DeviceReplyEnvelopeTests(APITestCase):
         self.assertEqual(self.step_execution.status, "FAILED")
         self.assertEqual(self.job.status, "FAILED")
         self.assertEqual(self.outbox.status, "FAILED")
+
+
+class TelemetryIngestDataPointTests(APITestCase):
+    def setUp(self):
+        material = MaterialType.objects.create(name="StirTelemetryDemo")
+        self.recipe = MaterialRecipe.objects.create(
+            material_type=material,
+            version=1,
+            stirring_speed_rpm=60,
+        )
+        self.step = RecipeStep.objects.create(
+            recipe=self.recipe,
+            step_no=1,
+            step_type="STIR",
+            parameters={
+                "device": "esp32",
+                "device_id": "esp32_7cdfa1e6d3cc",
+                "motor": 2,
+                "topic": "esp32/7cdfa1e6d3cc/control",
+            },
+        )
+        self.job = BatchJob.objects.create(recipe=self.recipe, status="RUNNING")
+        self.step_execution = BatchStepExecution.objects.create(
+            job=self.job,
+            recipe_step=self.step,
+            status="RUNNING",
+            command_payload={
+                "step_no": 1,
+                "step_type": "STIR",
+                "parameters": self.step.parameters,
+            },
+            started_at=timezone.now(),
+        )
+
+    def test_structured_telemetry_uses_explicit_job_and_step_ids(self):
+        telemetry, points = _record_experiment_telemetry(
+            "esp32/7cdfa1e6d3cc/telemetry",
+            {
+                "schema_version": 1,
+                "message_type": "telemetry",
+                "device": {"type": "esp32", "id": "esp32_7cdfa1e6d3cc"},
+                "correlation": {
+                    "job_id": self.job.id,
+                    "step_execution_id": self.step_execution.id,
+                },
+                "payload": {
+                    "motor": 2,
+                    "rpm": 60,
+                    "rotation_count": 1.0,
+                },
+            },
+        )
+
+        self.assertEqual(telemetry.job, self.job)
+        self.assertEqual(telemetry.step_execution, self.step_execution)
+        self.assertEqual(len(points), 2)
+        self.assertTrue(ExperimentDataPoint.objects.filter(
+            job=self.job,
+            step_execution=self.step_execution,
+            metric_name="rpm",
+            metric_value=60.0,
+            unit="rpm",
+        ).exists())
+        self.assertTrue(ExperimentDataPoint.objects.filter(
+            metric_name="rotation_count",
+            metric_value=1.0,
+            unit="rev",
+        ).exists())
+
+    def test_legacy_telemetry_can_match_running_stir_step(self):
+        telemetry, points = _record_legacy_telemetry(
+            "esp32/7cdfa1e6d3cc/telemetry",
+            "esp32_7cdfa1e6d3cc",
+            {
+                "motor": 2,
+                "rpm": 58,
+                "telemetry_type": "rpm",
+            },
+        )
+
+        self.assertEqual(telemetry.job, self.job)
+        self.assertEqual(telemetry.step_execution, self.step_execution)
+        self.assertEqual(len(points), 1)
+        point = ExperimentDataPoint.objects.get(telemetry=telemetry)
+        self.assertEqual(point.metric_name, "rpm")
+        self.assertEqual(point.metric_value, 58.0)
+        self.assertEqual(point.device_id, "esp32_7cdfa1e6d3cc")

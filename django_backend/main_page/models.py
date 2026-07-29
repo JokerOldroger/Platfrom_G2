@@ -358,6 +358,35 @@ class TelemetryIngest(models.Model):
     received_at = models.DateTimeField(auto_now_add=True, null=False)
 
 
+class ExperimentDataPoint(models.Model):
+    """结构化实验数据点：从原始 TelemetryIngest 中抽取可查询指标。"""
+    id = models.AutoField(primary_key=True, null=False)
+    job = models.ForeignKey(BatchJob, on_delete=models.SET_NULL, null=True, blank=True, related_name='data_points')
+    step_execution = models.ForeignKey(
+        BatchStepExecution, on_delete=models.SET_NULL, null=True, blank=True, related_name='data_points'
+    )
+    telemetry = models.ForeignKey(
+        TelemetryIngest, on_delete=models.CASCADE, null=True, blank=True, related_name='data_points'
+    )
+    device_type = models.CharField(max_length=32, null=True, blank=True)
+    device_id = models.CharField(max_length=64, null=True, blank=True)
+    metric_name = models.CharField(max_length=64, null=False, db_index=True)
+    metric_value = models.FloatField(null=True, blank=True)
+    metric_text = models.CharField(max_length=128, null=True, blank=True)
+    unit = models.CharField(max_length=32, null=True, blank=True)
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=False)
+
+    class Meta:
+        ordering = ['timestamp', 'id']
+        indexes = [
+            models.Index(fields=['job', 'metric_name']),
+            models.Index(fields=['step_execution', 'metric_name']),
+            models.Index(fields=['device_id', 'metric_name']),
+        ]
+
+
 DEVICE_STATUS_CHOICES = (
     ('idle', 'Idle'),
     ('busy', 'Busy'),

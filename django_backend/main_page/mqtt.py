@@ -23,7 +23,10 @@ from django.db import models
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
-from .models import Motor, MotorEvent, MotorData, BatchJob, BatchStepExecution, CommandOutbox, TelemetryIngest, Spinning
+from .models import (
+    Motor, MotorEvent, MotorData, BatchJob, BatchStepExecution, CommandOutbox,
+    TelemetryIngest, ExperimentDataPoint, Spinning
+)
 from .orchestration.dispatch_runtime import (
     default_device_id as orchestration_default_device_id,
     dispatch_transport_message as orchestration_dispatch_transport_message,
@@ -855,6 +858,167 @@ def _extract_device_metadata(envelope):
     )
 
 
+def _coerce_int(value):
+    if value is None or value == '':
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value):
+    if value is None or value == '':
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_telemetry_context(envelope, *, device_id=None, motor=None):
+    """从 telemetry 包或当前运行步骤中解析 job/step 上下文。"""
+    correlation = envelope.get('correlation') or {}
+    job_id = _coerce_int(envelope.get('job_id') or correlation.get('job_id'))
+    step_execution_id = _coerce_int(
+        envelope.get('step_execution_id') or correlation.get('step_execution_id')
+    )
+
+    step_execution = None
+    job = None
+    if step_execution_id:
+        try:
+            step_execution = BatchStepExecution.objects.select_related('job').get(id=step_execution_id)
+            job = step_execution.job
+        except BatchStepExecution.DoesNotExist:
+            step_execution = None
+    if job is None and job_id:
+        try:
+            job = BatchJob.objects.get(id=job_id)
+        except BatchJob.DoesNotExist:
+            job = None
+
+    if step_execution is None and device_id:
+        running_steps = BatchStepExecution.objects.select_related('job', 'recipe_step').filter(
+            job__status='RUNNING',
+            status__in=['RUNNING', 'QUEUED'],
+        ).order_by('-started_at', '-id')
+        for candidate in running_steps:
+            payload = candidate.command_payload or {}
+            parameters = payload.get('parameters') or {}
+            candidate_device = str(parameters.get('device_id') or '')
+            candidate_motor = _coerce_int(parameters.get('motor') or parameters.get('motor_index'))
+            if candidate_device and candidate_device != device_id:
+                continue
+            if motor is not None and candidate_motor is not None and candidate_motor != motor:
+                continue
+            step_execution = candidate
+            job = candidate.job
+            break
+
+    return job, step_execution
+
+
+def _metric_unit(metric_name):
+    return {
+        'rpm': 'rpm',
+        'pcnt': 'count',
+        'pwm': 'raw',
+        'rotation_count': 'rev',
+        'temperature_c': 'degC',
+    }.get(metric_name)
+
+
+def _extract_metric_points(payload):
+    metrics = []
+    seen = set()
+    if not isinstance(payload, dict):
+        return metrics
+
+    telemetry_type = payload.get('telemetry_type')
+    if telemetry_type and telemetry_type in payload:
+        metrics.append((telemetry_type, payload.get(telemetry_type), _metric_unit(telemetry_type)))
+        seen.add(telemetry_type)
+
+    for key, value in payload.items():
+        if key in {'motor', 'telemetry_type', 'job_id', 'step_execution_id', 'timestamp'}:
+            continue
+        if isinstance(value, (dict, list)):
+            continue
+        if key in {'rpm', 'pcnt', 'pwm', 'rotation_count', 'temperature_c'} and key not in seen:
+            metrics.append((key, value, _metric_unit(key)))
+            seen.add(key)
+    return metrics
+
+
+def _record_experiment_telemetry(topic, envelope, *, fallback_device_id=None):
+    """保存原始 telemetry，并抽取结构化 ExperimentDataPoint。"""
+    payload = envelope.get('payload') if isinstance(envelope.get('payload'), dict) else envelope
+    device_type, envelope_device_id = _extract_device_metadata(envelope)
+    effective_device_id = envelope_device_id or fallback_device_id
+    motor = _coerce_int(payload.get('motor')) if isinstance(payload, dict) else None
+    job, step_execution = _resolve_telemetry_context(envelope, device_id=effective_device_id, motor=motor)
+
+    telemetry = TelemetryIngest.objects.create(
+        job=job,
+        step_execution=step_execution,
+        device_type=device_type or ('esp32' if effective_device_id and effective_device_id.startswith('esp32_') else None),
+        device_id=effective_device_id,
+        topic=topic,
+        payload=envelope,
+    )
+
+    timestamp = (
+        _parse_iso_datetime(envelope.get('timestamp'))
+        or _parse_iso_datetime(payload.get('timestamp') if isinstance(payload, dict) else None)
+        or telemetry.received_at
+    )
+    points = []
+    for metric_name, metric_value, unit in _extract_metric_points(payload):
+        numeric_value = _coerce_float(metric_value)
+        points.append(ExperimentDataPoint(
+            job=job,
+            step_execution=step_execution,
+            telemetry=telemetry,
+            device_type=telemetry.device_type,
+            device_id=effective_device_id,
+            metric_name=metric_name,
+            metric_value=numeric_value,
+            metric_text=None if numeric_value is not None else str(metric_value),
+            unit=unit,
+            timestamp=timestamp,
+            raw_payload=envelope,
+        ))
+    if points:
+        ExperimentDataPoint.objects.bulk_create(points)
+
+    return telemetry, points
+
+
+def _record_legacy_telemetry(topic, device_id, payload):
+    envelope = {
+        'schema_version': 1,
+        'message_type': 'telemetry',
+        'device': {'type': 'esp32', 'id': device_id},
+        'payload': payload,
+        'timestamp': timezone.now().isoformat(),
+    }
+    try:
+        return _record_experiment_telemetry(topic, envelope, fallback_device_id=device_id)
+    except Exception as exc:
+        print(f'Failed to persist telemetry payload={payload}, error: {exc}')
+        return None, []
+
+
 def process_device_reply_envelope(topic, envelope):
     def _on_step_done(job):
         dispatch_ready_steps(
@@ -897,6 +1061,33 @@ def on_message(mqtt_client, userdata, msg):
                 package['device_id'] = device_id or package.get('device_id')
                 _broadcast('device_reply', package)
                 return
+            if envelope.get('message_type') == 'telemetry':
+                effective_device_id = (
+                    device_id
+                    or _extract_device_metadata(envelope)[1]
+                    or envelope.get('device_id')
+                    or 'esp32_1'
+                )
+                telemetry_payload = envelope.get('payload') if isinstance(envelope.get('payload'), dict) else envelope
+                motor = telemetry_payload.get('motor') if isinstance(telemetry_payload, dict) else None
+                if motor is not None and isinstance(telemetry_payload, dict):
+                    for metric in ['pcnt', 'rpm', 'pwm', 'rotation_count', 'temperature_c']:
+                        if metric in telemetry_payload:
+                            _update_device_telemetry(effective_device_id, motor, metric, telemetry_payload[metric])
+                telemetry, points = _record_experiment_telemetry(
+                    topic,
+                    envelope,
+                    fallback_device_id=effective_device_id,
+                )
+                _broadcast('telemetry', {
+                    'device_id': effective_device_id,
+                    'job_id': telemetry.job_id,
+                    'step_execution_id': telemetry.step_execution_id,
+                    'telemetry_id': telemetry.id,
+                    'data_point_ids': [point.id for point in points],
+                    'payload': telemetry_payload,
+                })
+                return
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -928,8 +1119,17 @@ def on_message(mqtt_client, userdata, msg):
                 effective_device_id = device_id or 'esp32_1'
                 device_data(effective_device_id, motor, 1, count)
                 _update_device_telemetry(effective_device_id, motor, 'pcnt', count)
+                telemetry, points = _record_legacy_telemetry(topic, effective_device_id, {
+                    'motor': motor,
+                    'pcnt': count,
+                    'telemetry_type': 'pcnt',
+                })
                 _broadcast('telemetry', {
                     'device_id': effective_device_id,
+                    'job_id': telemetry.job_id if telemetry else None,
+                    'step_execution_id': telemetry.step_execution_id if telemetry else None,
+                    'telemetry_id': telemetry.id if telemetry else None,
+                    'data_point_ids': [point.id for point in points],
                     'payload': {'motor': motor, 'pcnt': count, 'telemetry_type': 'pcnt'},
                 })
         except Exception as exc:
@@ -946,8 +1146,17 @@ def on_message(mqtt_client, userdata, msg):
                 effective_device_id = device_id or 'esp32_1'
                 _update_device_telemetry(effective_device_id, motor, 'rpm', rpm)
                 _update_motor_health(effective_device_id, motor, rpm)
+                telemetry, points = _record_legacy_telemetry(topic, effective_device_id, {
+                    'motor': motor,
+                    'rpm': rpm,
+                    'telemetry_type': 'rpm',
+                })
                 _broadcast('telemetry', {
                     'device_id': effective_device_id,
+                    'job_id': telemetry.job_id if telemetry else None,
+                    'step_execution_id': telemetry.step_execution_id if telemetry else None,
+                    'telemetry_id': telemetry.id if telemetry else None,
+                    'data_point_ids': [point.id for point in points],
                     'payload': {'motor': motor, 'rpm': rpm, 'telemetry_type': 'rpm'},
                 })
         except Exception as exc:
@@ -964,8 +1173,17 @@ def on_message(mqtt_client, userdata, msg):
                 effective_device_id = device_id or 'esp32_1'
                 device_data(effective_device_id, motor, 2, count)
                 _update_device_telemetry(effective_device_id, motor, 'pwm', count)
+                telemetry, points = _record_legacy_telemetry(topic, effective_device_id, {
+                    'motor': motor,
+                    'pwm': count,
+                    'telemetry_type': 'pwm',
+                })
                 _broadcast('telemetry', {
                     'device_id': effective_device_id,
+                    'job_id': telemetry.job_id if telemetry else None,
+                    'step_execution_id': telemetry.step_execution_id if telemetry else None,
+                    'telemetry_id': telemetry.id if telemetry else None,
+                    'data_point_ids': [point.id for point in points],
                     'payload': {'motor': motor, 'pwm': count, 'telemetry_type': 'pwm'},
                 })
         except Exception as exc:

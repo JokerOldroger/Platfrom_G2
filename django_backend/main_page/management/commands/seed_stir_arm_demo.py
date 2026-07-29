@@ -15,6 +15,14 @@ class Command(BaseCommand):
         parser.add_argument('--motor-topic', default=None)
         parser.add_argument('--stirring-speed-rpm', type=int, default=60)
         parser.add_argument('--fixed-rotations', type=float, default=1.0)
+        parser.add_argument(
+            '--duration-sec',
+            '--spinning-time-sec',
+            dest='duration_sec',
+            type=int,
+            default=None,
+            help='Explicit motor running time in seconds. If omitted, duration is computed from fixed rotations and rpm.',
+        )
         parser.add_argument('--hover-waypoint', default='reactor_hover')
         parser.add_argument('--arm-device-id', default='arm01')
 
@@ -33,28 +41,36 @@ class Command(BaseCommand):
             version=options['recipe_version'],
             defaults={
                 'is_active': True,
-                'notes': 'Auto-seeded demo: fixed motor rotations, then arm hover waypoint.',
+                'notes': (
+                    'Auto-seeded demo: timed motor run, then arm hover waypoint.'
+                    if options['duration_sec'] is not None else
+                    'Auto-seeded demo: fixed motor rotations, then arm hover waypoint.'
+                ),
                 'stirring_speed_rpm': options['stirring_speed_rpm'],
                 'stirring_duration_min': None,
             },
         )
+        stir_parameters = {
+            'topic': motor_topic,
+            'device': 'esp32',
+            'device_id': esp32_device_id,
+            'motor': options['motor_id'],
+            'speed_key': 'stirring_speed_rpm',
+            'resource_locks': ['stir_chamber:chamber01'],
+        }
+        if options['duration_sec'] is not None:
+            stir_parameters['duration_sec'] = options['duration_sec']
+        else:
+            stir_parameters['fixed_rotations'] = options['fixed_rotations']
 
         RecipeStep.objects.update_or_create(
             recipe=recipe,
             step_no=1,
             defaults={
                 'step_type': 'STIR',
-                'name': 'Run stir chamber fixed rotations',
-                'expected_duration_sec': None,
-                'parameters': {
-                    'topic': motor_topic,
-                    'device': 'esp32',
-                    'device_id': esp32_device_id,
-                    'motor': options['motor_id'],
-                    'speed_key': 'stirring_speed_rpm',
-                    'fixed_rotations': options['fixed_rotations'],
-                    'resource_locks': ['stir_chamber:chamber01'],
-                },
+                'name': 'Run stir chamber timed motor' if options['duration_sec'] is not None else 'Run stir chamber fixed rotations',
+                'expected_duration_sec': options['duration_sec'],
+                'parameters': stir_parameters,
             },
         )
         RecipeStep.objects.update_or_create(
@@ -80,6 +96,7 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 'Created/updated demo recipe '
                 f'id={recipe.id}, material={material.name}, version={recipe.version}, '
-                f'esp32_device_id={esp32_device_id}, motor_topic={motor_topic}.'
+                f'esp32_device_id={esp32_device_id}, motor_topic={motor_topic}, '
+                f"duration_sec={options['duration_sec']}, fixed_rotations={options['fixed_rotations']}."
             )
         )

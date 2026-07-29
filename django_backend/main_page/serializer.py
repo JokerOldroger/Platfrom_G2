@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     Task, MotorControl, User, LoginRecord, Motor, Spinning, MotorEvent, MotorData, ExperimentProcess,
     MaterialType, MaterialRecipe, RecipeStep, BatchJob, BatchStepExecution, CommandOutbox, TelemetryIngest,
-    Device, EmergencyStopLog
+    ExperimentDataPoint, Device, EmergencyStopLog
 )
 
 class TaskSerializer(serializers.ModelSerializer):
@@ -97,6 +97,12 @@ class CommandOutboxSerializer(serializers.ModelSerializer):
 class TelemetryIngestSerializer(serializers.ModelSerializer):
     class Meta:
         model = TelemetryIngest
+        fields = '__all__'
+
+
+class ExperimentDataPointSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ExperimentDataPoint
         fields = '__all__'
 
 
