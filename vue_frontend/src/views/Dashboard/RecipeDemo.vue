@@ -29,12 +29,15 @@
                     :loading-preview="loadingPreview"
                     :creating-job="creatingJob"
                     :starting-job="startingJob"
+                    :saving-recipe="savingRecipe"
                     :created-job="createdJob"
+                    :equivalent-command="equivalentCommand"
                     :form-message="formMessage"
                     :error-message="errorMessage"
                     @preview="previewPlan"
                     @create-job="createDemoJob"
                     @start-job="startDemoJob"
+                    @upsert-recipe="upsertRecipeMapping"
                     @material-change="onMaterialChange"
                     @recipe-change="onRecipeChange"
                 />
@@ -131,9 +134,14 @@ export default {
                 selectedMaterialId: '',
                 selectedRecipeId: '',
                 operator: 'operator_demo',
+                materialName: 'StirArmDemo',
+                recipeName: 'Timed stir then home',
+                recipeVersion: 1,
+                durationSec: 10,
+                armPathPreset: 'home',
                 overrides: {
                     reaction_temperature_c: '',
-                    stirring_speed_rpm: ''
+                    stirring_speed_rpm: 800
                 }
             },
             materials: [],
@@ -146,8 +154,10 @@ export default {
             loadingPreview: false,
             creatingJob: false,
             startingJob: false,
+            savingRecipe: false,
             formMessage: '',
             errorMessage: '',
+            equivalentCommand: '',
             statusPoller: null,
             wsClient: null,
             liveEvents: []
@@ -182,7 +192,7 @@ export default {
         recipeLabel(recipe) {
             const material = this.materials.find(item => item.id === recipe.material_type)
             const materialName = material ? material.name : `Material ${recipe.material_type}`
-            return `${materialName} / v${recipe.version}`
+            return `${materialName} / ${recipe.name || 'Recipe'} / v${recipe.version}`
         },
         sanitizeOverrides() {
             const result = {}
@@ -193,6 +203,50 @@ export default {
                 result.stirring_speed_rpm = Number(this.formModel.overrides.stirring_speed_rpm)
             }
             return result
+        },
+        buildRecipeMappingPayload() {
+            const trajectory = String(this.formModel.armPathPreset || 'home')
+                .split(',')
+                .map(item => item.trim())
+                .filter(Boolean)
+            return {
+                material_name: this.formModel.materialName || 'StirArmDemo',
+                recipe_name: this.formModel.recipeName || 'Timed stir then home',
+                recipe_version: Number(this.formModel.recipeVersion || 1),
+                esp32_device_id: 'esp32_7cdfa1e6d3cc',
+                motor_id: 2,
+                stirring_speed_rpm: Number(this.formModel.overrides.stirring_speed_rpm || 800),
+                duration_sec: Number(this.formModel.durationSec || 10),
+                reaction_temperature_c: this.formModel.overrides.reaction_temperature_c === ''
+                    ? null
+                    : Number(this.formModel.overrides.reaction_temperature_c),
+                arm_trajectory: trajectory,
+                hover_waypoint: trajectory[trajectory.length - 1] || 'home',
+                arm_device_id: 'arm01'
+            }
+        },
+        applyRecipeAndStepsToForm(recipe, steps = []) {
+            const material = this.materials.find(item => item.id === recipe.material_type)
+            const stirStep = steps.find(step => step.step_type === 'STIR')
+            const armStep = steps.find(step => step.step_type === 'MOVE_ARM')
+            const trajectory = armStep?.parameters?.goal?.trajectory || []
+
+            this.formModel = {
+                ...this.formModel,
+                inputMode: 'recipe',
+                selectedMaterialId: recipe.material_type,
+                selectedRecipeId: recipe.id,
+                materialName: material?.name || this.formModel.materialName,
+                recipeName: recipe.name || this.formModel.recipeName,
+                recipeVersion: recipe.version,
+                durationSec: stirStep?.parameters?.duration_sec ?? this.formModel.durationSec,
+                armPathPreset: trajectory.length ? trajectory.join(',') : this.formModel.armPathPreset,
+                overrides: {
+                    ...this.formModel.overrides,
+                    reaction_temperature_c: recipe.reaction_temperature_c ?? '',
+                    stirring_speed_rpm: recipe.stirring_speed_rpm ?? ''
+                }
+            }
         },
         connectRealtimeFeed() {
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
@@ -341,6 +395,7 @@ export default {
             this.loadingPreview = true
             this.errorMessage = ''
             this.formMessage = ''
+            this.equivalentCommand = ''
             this.createdJob = null
             this.startResult = null
             this.jobStatus = null
@@ -364,12 +419,52 @@ export default {
                     ...overrides
                 }
                 this.steps = stepsResponse.data
+                this.applyRecipeAndStepsToForm(recipe, this.steps)
                 this.formMessage = 'Execution plan resolved from backend recipe data and linked device steps.'
             } catch (error) {
                 this.errorMessage = 'Unable to resolve the operation plan. Check whether the recipe and its steps exist.'
                 console.log(error)
             } finally {
                 this.loadingPreview = false
+            }
+        },
+        async upsertRecipeMapping() {
+            this.savingRecipe = true
+            this.errorMessage = ''
+            this.formMessage = ''
+            this.createdJob = null
+            this.startResult = null
+            this.jobStatus = null
+            this.stopStatusPolling()
+
+            try {
+                const response = await materialsApi.upsertStirArmDemoRecipe(this.buildRecipeMappingPayload())
+                const { material, recipe, steps, equivalent_command } = response.data
+                this.materials = [
+                    ...this.materials.filter(item => item.id !== material.id),
+                    material
+                ].sort((left, right) => left.name.localeCompare(right.name))
+                this.recipes = [
+                    ...this.recipes.filter(item => item.id !== recipe.id),
+                    recipe
+                ].sort((left, right) => left.material_type - right.material_type || Number(left.version) - Number(right.version))
+                this.steps = steps
+                this.previewParameters = {
+                    dmac_dosage_ml: recipe.dmac_dosage_ml,
+                    water_dosage_ml: recipe.water_dosage_ml,
+                    solvent_ph: recipe.solvent_ph,
+                    reaction_temperature_c: recipe.reaction_temperature_c,
+                    stirring_speed_rpm: recipe.stirring_speed_rpm,
+                    stirring_duration_min: recipe.stirring_duration_min
+                }
+                this.applyRecipeAndStepsToForm(recipe, steps)
+                this.equivalentCommand = equivalent_command
+                this.formMessage = 'Recipe mapping saved. Create a job to freeze this material/action plan into executable steps.'
+            } catch (error) {
+                this.errorMessage = 'Failed to save recipe mapping. Check material name, recipe version, duration, and waypoint settings.'
+                console.log(error)
+            } finally {
+                this.savingRecipe = false
             }
         },
         async createDemoJob() {

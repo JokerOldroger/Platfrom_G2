@@ -24,6 +24,7 @@ urlpatterns = [
     path('experiments/<str:experiment_id>/', views.experiment_process_detail, name='experiment_detail'),
     path('materials/', views.material_type_list, name='materials'),
     path('recipes/', views.material_recipe_list, name='recipes'),
+    path('recipes/stir-arm-demo/upsert/', views.stir_arm_demo_recipe_upsert, name='recipes_stir_arm_demo_upsert'),
     path('recipes/<int:recipe_id>/', views.material_recipe_detail, name='recipe_detail'),
     path('recipes/<int:recipe_id>/steps/', views.recipe_step_list_create, name='recipe_steps'),
     path('jobs/', views.batch_job_create, name='jobs_create'),

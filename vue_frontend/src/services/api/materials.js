@@ -15,5 +15,9 @@ export default {
 
   getRecipeSteps(id) {
     return client.get(`/api/v1/recipes/${id}/steps/`)
+  },
+
+  upsertStirArmDemoRecipe(payload) {
+    return client.post('/api/v1/recipes/stir-arm-demo/upsert/', payload)
   }
 }

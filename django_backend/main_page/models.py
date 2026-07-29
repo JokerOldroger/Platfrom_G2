@@ -258,6 +258,7 @@ class MaterialType(models.Model):
 class MaterialRecipe(models.Model):
     id = models.AutoField(primary_key=True, null=False)
     material_type = models.ForeignKey(MaterialType, on_delete=models.CASCADE, related_name='recipes')
+    name = models.CharField(max_length=100, default='Default Recipe', null=False)
     version = models.IntegerField(default=1, null=False)
     is_active = models.BooleanField(default=True, null=False)
     notes = models.CharField(max_length=256, null=True, blank=True)

@@ -126,6 +126,34 @@ class RecipeAndJobApiTests(APITestCase):
         self.assertEqual(resp.data[0]["step_no"], 1)
         self.assertEqual(resp.data[1]["step_no"], 2)
 
+    def test_stir_arm_demo_recipe_upsert_endpoint(self):
+        resp = self.client.post(
+            "/api/v1/recipes/stir-arm-demo/upsert/",
+            {
+                "material_name": "StirArmDemo",
+                "recipe_name": "Timed stir then home",
+                "recipe_version": 1,
+                "esp32_device_id": "esp32_7cdfa1e6d3cc",
+                "motor_id": 2,
+                "stirring_speed_rpm": 800,
+                "duration_sec": 10,
+                "reaction_temperature_c": 75.5,
+                "arm_trajectory": ["home"],
+                "arm_device_id": "arm01",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["material"]["name"], "StirArmDemo")
+        self.assertEqual(resp.data["recipe"]["name"], "Timed stir then home")
+        self.assertEqual(resp.data["recipe"]["stirring_speed_rpm"], 800)
+        self.assertIn("--duration-sec 10", resp.data["equivalent_command"])
+
+        steps = {step["step_type"]: step for step in resp.data["steps"]}
+        self.assertEqual(steps["STIR"]["parameters"]["motor"], 2)
+        self.assertEqual(steps["STIR"]["parameters"]["duration_sec"], 10)
+        self.assertEqual(steps["MOVE_ARM"]["parameters"]["goal"]["trajectory"], ["home"])
+
     def test_job_create_success_creates_step_executions(self):
         resp = self.client.post(
             "/api/v1/jobs/",

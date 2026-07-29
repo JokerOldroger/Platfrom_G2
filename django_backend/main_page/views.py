@@ -40,10 +40,12 @@ from .orchestration.step_executors import (
     build_planned_parameters,
     default_step_executor_registry,
 )
+from .recipe_seeds import upsert_stir_arm_demo_recipe
 
 import requests
 import base64
 from decimal import Decimal
+from shlex import quote
 
 
 @api_view(['GET', 'POST'])
@@ -734,6 +736,56 @@ def recipe_step_list_create(request, recipe_id):
         serializer.save()
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+def stir_arm_demo_recipe_upsert(request):
+    payload = request.data
+    try:
+        seed = upsert_stir_arm_demo_recipe(
+            material_name=payload.get('material_name') or 'StirArmDemo',
+            recipe_name=payload.get('recipe_name') or 'Stir Arm Demo',
+            recipe_version=payload.get('recipe_version') or 1,
+            esp32_device_id=payload.get('esp32_device_id') or 'esp32_7cdfa1e6d3cc',
+            motor_id=payload.get('motor_id') or 2,
+            motor_topic=payload.get('motor_topic') or None,
+            stirring_speed_rpm=payload.get('stirring_speed_rpm') or 800,
+            duration_sec=payload.get('duration_sec'),
+            fixed_rotations=payload.get('fixed_rotations') or 1.0,
+            reaction_temperature_c=payload.get('reaction_temperature_c'),
+            stirring_duration_min=payload.get('stirring_duration_min'),
+            hover_waypoint=payload.get('hover_waypoint') or 'home',
+            arm_trajectory=payload.get('arm_trajectory') or None,
+            arm_device_id=payload.get('arm_device_id') or 'arm01',
+        )
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    recipe = seed['recipe']
+    steps = seed['steps']
+    command = [
+        'python3 django_backend/manage.py seed_stir_arm_demo',
+        f"--material-name {quote(seed['material'].name)}",
+        f"--recipe-name {quote(recipe.name)}",
+        f"--recipe-version {recipe.version}",
+        f"--esp32-device-id {payload.get('esp32_device_id') or 'esp32_7cdfa1e6d3cc'}",
+        f"--motor-id {payload.get('motor_id') or 2}",
+        f"--stirring-speed-rpm {recipe.stirring_speed_rpm}",
+    ]
+    if payload.get('duration_sec') not in (None, ''):
+        command.append(f"--duration-sec {payload.get('duration_sec')}")
+    if recipe.reaction_temperature_c is not None:
+        command.append(f"--reaction-temperature-c {recipe.reaction_temperature_c}")
+    if seed['arm_trajectory']:
+        command.append('--arm-trajectory ' + ' '.join(quote(point) for point in seed['arm_trajectory']))
+    command.append(f"--arm-device-id {payload.get('arm_device_id') or 'arm01'}")
+
+    return Response({
+        'material': MaterialTypeSerializer(seed['material']).data,
+        'recipe': MaterialRecipeSerializer(recipe).data,
+        'steps': RecipeStepSerializer(steps, many=True).data,
+        'equivalent_command': ' '.join(command),
+    }, status=status.HTTP_200_OK)
 
 
 def _build_step_command_payload(recipe_step, planned_parameters):

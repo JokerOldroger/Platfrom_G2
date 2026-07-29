@@ -30,4 +30,12 @@ describe('api/materials', () => {
     expect(spy).toHaveBeenCalledWith('/api/v1/recipes/5/steps/')
     spy.mockRestore()
   })
+
+  it('upsertStirArmDemoRecipe calls POST /api/v1/recipes/stir-arm-demo/upsert/', async () => {
+    const spy = vi.spyOn(client, 'post').mockResolvedValue({ data: {} })
+    const payload = { material_name: 'StirArmDemo', recipe_name: 'Timed stir then home' }
+    await materialsApi.upsertStirArmDemoRecipe(payload)
+    expect(spy).toHaveBeenCalledWith('/api/v1/recipes/stir-arm-demo/upsert/', payload)
+    spy.mockRestore()
+  })
 })

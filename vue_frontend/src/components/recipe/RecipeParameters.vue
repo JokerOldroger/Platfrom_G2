@@ -9,6 +9,10 @@
             <span class="parameter-card__value">{{ recipeLabel }}</span>
         </article>
         <article class="parameter-card">
+            <span class="parameter-card__label">Recipe Name</span>
+            <span class="parameter-card__value">{{ selectedRecipe.name || 'N/A' }}</span>
+        </article>
+        <article class="parameter-card">
             <span class="parameter-card__label">DMAc</span>
             <span class="parameter-card__value">{{ selectedRecipe.dmac_dosage_ml ?? 'N/A' }} mL</span>
         </article>
