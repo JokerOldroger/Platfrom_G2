@@ -30,6 +30,7 @@ def generate_launch_description():
     world = LaunchConfiguration('world')
     model = LaunchConfiguration('model')
     controllers_file = LaunchConfiguration('controllers_file')
+    use_gazebo_meshes = LaunchConfiguration('use_gazebo_meshes')
 
     # 控制器配置以绝对路径传给 Gazebo 插件，避免安装空间和源码空间解析不一致。
     robot_description = ParameterValue(
@@ -42,6 +43,9 @@ def generate_launch_description():
             ' ',
             'controllers_file:=',
             controllers_file,
+            ' ',
+            'use_gazebo_meshes:=',
+            use_gazebo_meshes,
         ]),
         value_type=str,
     )
@@ -147,6 +151,11 @@ def generate_launch_description():
             'use_rviz',
             default_value='true',
             description='是否同时启动 RViz2。',
+        ),
+        DeclareLaunchArgument(
+            'use_gazebo_meshes',
+            default_value='false',
+            description='官方模型是否使用转换后的 Gazebo STL 网格。',
         ),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',

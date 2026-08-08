@@ -2,12 +2,29 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="mycobot_pro600">
   <xacro:arg name="use_ros2_control" default="true"/>
   <xacro:arg name="controllers_file" default=""/>
+  <xacro:arg name="use_gazebo_meshes" default="false"/>
+
+  <material name="pro600_dark">
+    <color rgba="0.12 0.14 0.16 1"/>
+  </material>
+  <material name="pro600_white">
+    <color rgba="0.82 0.84 0.86 1"/>
+  </material>
+  <material name="pro600_blue">
+    <color rgba="0.10 0.32 0.58 1"/>
+  </material>
 
   <link name="base">
     <visual>
       <geometry>
-        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/base.dae"/>
+        <xacro:if value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/meshes/gazebo/base.stl"/>
+        </xacro:if>
+        <xacro:unless value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/base.dae"/>
+        </xacro:unless>
       </geometry>
+      <material name="pro600_dark"/>
       <origin xyz="0 0 0" rpy="0 0 0"/>
     </visual>
     <collision>
@@ -26,8 +43,14 @@
   <link name="link1">
     <visual>
       <geometry>
-        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link1.dae"/>
+        <xacro:if value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/meshes/gazebo/link1.stl"/>
+        </xacro:if>
+        <xacro:unless value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link1.dae"/>
+        </xacro:unless>
       </geometry>
+      <material name="pro600_white"/>
       <origin xyz="0 0 0" rpy="0 0 3.1415926"/>
     </visual>
     <collision>
@@ -46,8 +69,14 @@
   <link name="link2">
     <visual>
       <geometry>
-        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link2.dae"/>
+        <xacro:if value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/meshes/gazebo/link2.stl"/>
+        </xacro:if>
+        <xacro:unless value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link2.dae"/>
+        </xacro:unless>
       </geometry>
+      <material name="pro600_blue"/>
       <origin xyz="0 0 -0.080" rpy="3.1415926 0 3.1415926"/>
     </visual>
     <collision>
@@ -66,8 +95,14 @@
   <link name="link3">
     <visual>
       <geometry>
-        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link3.dae"/>
+        <xacro:if value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/meshes/gazebo/link3.stl"/>
+        </xacro:if>
+        <xacro:unless value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link3.dae"/>
+        </xacro:unless>
       </geometry>
+      <material name="pro600_white"/>
       <origin xyz="0 0 -0.0855" rpy="3.1415926 0 3.1415926"/>
     </visual>
     <collision>
@@ -86,8 +121,14 @@
   <link name="link4">
     <visual>
       <geometry>
-        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link4.dae"/>
+        <xacro:if value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/meshes/gazebo/link4.stl"/>
+        </xacro:if>
+        <xacro:unless value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link4.dae"/>
+        </xacro:unless>
       </geometry>
+      <material name="pro600_blue"/>
       <origin xyz="0 0 0" rpy="0 3.1415926 0"/>
     </visual>
     <collision>
@@ -106,8 +147,14 @@
   <link name="link5">
     <visual>
       <geometry>
-        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link5.dae"/>
+        <xacro:if value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/meshes/gazebo/link5.stl"/>
+        </xacro:if>
+        <xacro:unless value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link5.dae"/>
+        </xacro:unless>
       </geometry>
+      <material name="pro600_white"/>
       <origin xyz="0 0 0" rpy="0 0 1.5707"/>
     </visual>
     <collision>
@@ -126,11 +173,14 @@
   <link name="link6">
     <visual>
       <geometry>
-        <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link6.dae"/>
+        <xacro:if value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/meshes/gazebo/link6.stl"/>
+        </xacro:if>
+        <xacro:unless value="$(arg use_gazebo_meshes)">
+          <mesh filename="package://mycobot_pro600_description/vendor_ros1/mycobot_description/urdf/mycobot_pro_600/link6.dae"/>
+        </xacro:unless>
       </geometry>
-      <material name="grey">
-        <color rgba="0.5 0.5 0.5 1"/>
-      </material>
+      <material name="pro600_dark"/>
       <origin xyz="0.03 0 0" rpy="0 -1.5707 0"/>
     </visual>
     <collision>

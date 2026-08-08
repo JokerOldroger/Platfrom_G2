@@ -185,13 +185,30 @@ ros2 action send_goal /arm_controller/follow_joint_trajectory \
   --feedback
 ```
 
-如需切回官方关节链，可同时指定官方模型和对应控制器文件；当前官方 DAE 在 Gazebo
-Ogre2 中仍可能出现 `zero sub-meshes`，因此不作为默认运动验证路径：
+### 官方 Pro600 外观与控制链
+
+官方 Rhino DAE 使用 Gazebo Ogre2 不兼容的 `<polygons>`。先将七个 link 网格三角化为
+二进制 STL；转换脚本不依赖 Blender、Assimp 或额外 Python 包：
 
 ```bash
-ros2 launch mycobot_pro600_gazebo gazebo.launch.py \
-  model:=$PWD/install/mycobot_pro600_description/share/mycobot_pro600_description/urdf/pro600_official_assets.urdf.xacro \
-  controllers_file:=$PWD/install/mycobot_pro600_gazebo/share/mycobot_pro600_gazebo/config/controllers_official.yaml
+cd ~/Platform_G2/ros2_bridge/ros2_ws/src/mycobot_pro600_description
+python3 scripts/convert_collada_for_gazebo.py
+
+cd ../..
+rm -rf build/mycobot_pro600_description build/mycobot_pro600_gazebo \
+  install/mycobot_pro600_description install/mycobot_pro600_gazebo
+colcon build --symlink-install --packages-up-to mycobot_pro600_gazebo
+source install/setup.bash
+ros2 launch mycobot_pro600_gazebo official_gazebo.launch.py use_rviz:=false
+```
+
+官方模型使用原始六关节名称。发送小幅测试轨迹：
+
+```bash
+ros2 action send_goal /arm_controller/follow_joint_trajectory \
+  control_msgs/action/FollowJointTrajectory \
+  "{trajectory: {joint_names: [joint2_to_joint1, joint3_to_joint2, joint4_to_joint3, joint5_to_joint4, joint6_to_joint5, joint6output_to_joint6], points: [{positions: [0.20, -0.30, 0.25, 0.15, -0.15, 0.20], time_from_start: {sec: 5, nanosec: 0}}]}}" \
+  --feedback
 ```
 
 ### 导入官方 ROS1 资产
@@ -203,10 +220,11 @@ cd ~/Platform_G2/ros2_bridge/ros2_ws/src/mycobot_pro600_description
 python3 scripts/import_ros1_assets.py --ros1-root ~/Downloads/mycobot_ros/mycobot_pro
 ```
 
-导入后会把官方资产放到：
+导入后会复制官方资产，并自动生成 Gazebo STL：
 
 - `mycobot_pro600_description/vendor_ros1/`
 - `mycobot_pro600_gazebo/vendor_ros1/`
+- `mycobot_pro600_description/meshes/gazebo/*.stl`
 
 如果你使用 sparse-checkout，只拉 `mycobot_600` 和 `mycobot_600_moveit` 还不够。官方 Pro600 的 URDF 会引用：
 
@@ -232,5 +250,6 @@ python3 scripts/import_ros1_assets.py --ros1-root ~/Documents/mycobot_ros_noetic
 当前策略是：
 
 1. 先让 ROS2 launch / controller / plugin 骨架可维护。
-2. ROS2 launch 默认使用 `urdf/pro600_official_assets.urdf.xacro`，它保留官方 Pro600 的 link、joint、collision 和 mesh 引用，并补了 ROS2 control。
-3. 不直接把 ROS1 launch 原样搬过来，避免把 ROS1 依赖残留到 ROS2 工作区。
+2. `gazebo.launch.py` 保留简化模型作为稳定基线；`official_gazebo.launch.py` 使用三角化官方外观、官方关节链与 ROS2 control。
+3. RViz 继续读取原始 DAE，Gazebo 使用 STL，避免不同渲染器相互影响。
+4. 不直接把 ROS1 launch 原样搬过来，避免把 ROS1 依赖残留到 ROS2 工作区。

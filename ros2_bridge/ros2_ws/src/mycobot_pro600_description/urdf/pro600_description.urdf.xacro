@@ -2,6 +2,7 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="mycobot_pro600">
   <xacro:arg name="use_ros2_control" default="true"/>
   <xacro:arg name="controllers_file" default=""/>
+  <xacro:arg name="use_gazebo_meshes" default="false"/>
 
   <xacro:macro name="cylinder_inertia" params="mass radius length">
     <inertial>

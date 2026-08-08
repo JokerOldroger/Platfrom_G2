@@ -1,0 +1,4 @@
+*.stl
+conversion_manifest.json
+!.gitignore
+!README.md

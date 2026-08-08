@@ -14,6 +14,8 @@ import json
 import shutil
 from pathlib import Path
 
+from convert_collada_for_gazebo import convert_directory
+
 
 def _copy_tree(src: Path, dst: Path) -> bool:
     if not src.exists():
@@ -30,6 +32,11 @@ def main() -> int:
         '--ros1-root',
         required=True,
         help='本地 mycobot_ros/noetic 工作树路径，或其 mycobot_pro 目录路径。',
+    )
+    parser.add_argument(
+        '--skip-gazebo-conversion',
+        action='store_true',
+        help='只导入官方资产，不生成 Gazebo Ogre2 兼容 STL。',
     )
     args = parser.parse_args()
 
@@ -86,16 +93,27 @@ def main() -> int:
         },
     }
 
+    conversion = None
+    official_mesh_dir = (
+        vendor_description_root / 'mycobot_description' / 'urdf' / 'mycobot_pro_600'
+    )
+    if copied['description']['mycobot_description_meshes'] and not args.skip_gazebo_conversion:
+        conversion = convert_directory(
+            official_mesh_dir,
+            description_package_root / 'meshes' / 'gazebo',
+        )
+
     manifest = {
         'ros1_root': str(ros1_root),
         'mycobot_pro_root': str(mycobot_pro_root),
         'copied': copied,
+        'gazebo_mesh_conversion': conversion,
         'next_steps': [
             '若 copied.description.mycobot_description_meshes 为 false，请补拉官方 mycobot_description 目录，'
             '否则 Pro600 的 dae mesh 视觉模型无法显示。',
             '对照 vendor_ros1/mycobot_600_moveit/config 下的关节限制、初始姿态与控制器配置，'
             '合并到 mycobot_pro600_gazebo/config/controllers.yaml。',
-            '当前 ROS2 launch 默认使用 urdf/pro600_official_assets.urdf.xacro，关节/碰撞/mesh 引用已按官方 URDF 适配。',
+            '使用 official_gazebo.launch.py 加载三角化 STL、官方关节链和 gz_ros2_control。',
         ],
     }
 
