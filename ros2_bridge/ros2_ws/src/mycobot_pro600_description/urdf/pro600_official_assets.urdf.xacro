@@ -3,6 +3,7 @@
   <xacro:arg name="use_ros2_control" default="true"/>
   <xacro:arg name="controllers_file" default=""/>
   <xacro:arg name="use_gazebo_meshes" default="false"/>
+  <xacro:arg name="fixed_base" default="true"/>
 
   <material name="pro600_dark">
     <color rgba="0.12 0.14 0.16 1"/>
@@ -13,6 +14,15 @@
   <material name="pro600_blue">
     <color rgba="0.10 0.32 0.58 1"/>
   </material>
+
+  <xacro:if value="$(arg fixed_base)">
+    <link name="world"/>
+    <joint name="world_to_base" type="fixed">
+      <parent link="world"/>
+      <child link="base"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+  </xacro:if>
 
   <link name="base">
     <visual>

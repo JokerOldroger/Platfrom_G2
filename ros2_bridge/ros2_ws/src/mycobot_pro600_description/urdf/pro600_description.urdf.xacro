@@ -3,6 +3,7 @@
   <xacro:arg name="use_ros2_control" default="true"/>
   <xacro:arg name="controllers_file" default=""/>
   <xacro:arg name="use_gazebo_meshes" default="false"/>
+  <xacro:arg name="fixed_base" default="true"/>
 
   <xacro:macro name="cylinder_inertia" params="mass radius length">
     <inertial>
@@ -41,6 +42,15 @@
   <material name="platform_silver">
     <color rgba="0.72 0.74 0.78 1.0"/>
   </material>
+
+  <xacro:if value="$(arg fixed_base)">
+    <link name="world"/>
+    <joint name="world_to_base" type="fixed">
+      <parent link="world"/>
+      <child link="base_link"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+  </xacro:if>
 
   <link name="base_link">
     <visual>

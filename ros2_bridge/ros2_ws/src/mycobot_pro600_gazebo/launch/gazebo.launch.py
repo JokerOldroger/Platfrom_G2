@@ -31,6 +31,7 @@ def generate_launch_description():
     model = LaunchConfiguration('model')
     controllers_file = LaunchConfiguration('controllers_file')
     use_gazebo_meshes = LaunchConfiguration('use_gazebo_meshes')
+    fixed_base = LaunchConfiguration('fixed_base')
 
     # 控制器配置以绝对路径传给 Gazebo 插件，避免安装空间和源码空间解析不一致。
     robot_description = ParameterValue(
@@ -46,6 +47,9 @@ def generate_launch_description():
             ' ',
             'use_gazebo_meshes:=',
             use_gazebo_meshes,
+            ' ',
+            'fixed_base:=',
+            fixed_base,
         ]),
         value_type=str,
     )
@@ -83,7 +87,7 @@ def generate_launch_description():
             '-y',
             '0.0',
             '-z',
-            '0.05',
+            '0.0',
         ],
     )
 
@@ -156,6 +160,11 @@ def generate_launch_description():
             'use_gazebo_meshes',
             default_value='false',
             description='官方模型是否使用转换后的 Gazebo STL 网格。',
+        ),
+        DeclareLaunchArgument(
+            'fixed_base',
+            default_value='true',
+            description='是否用 world_to_base 固定关节锚定机械臂底座。',
         ),
         SetEnvironmentVariable(
             name='GZ_SIM_RESOURCE_PATH',

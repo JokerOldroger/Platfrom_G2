@@ -133,6 +133,7 @@ python ros2_bridge/main.py
    - 重写了 ROS2 `gazebo.launch.py`
    - 提供 `controllers.yaml`
    - 使用 Jazzy 的 `gz_ros2_control + joint_state_broadcaster + joint_trajectory_controller`
+   - 默认通过 `world_to_base` 固定底座，模拟真实机械臂的台面安装方式
 
 ### 先跑 RViz
 
