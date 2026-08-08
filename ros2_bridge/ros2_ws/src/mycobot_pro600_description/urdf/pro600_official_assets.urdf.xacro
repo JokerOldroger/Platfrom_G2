@@ -1,6 +1,7 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="mycobot_pro600">
   <xacro:arg name="use_ros2_control" default="true"/>
+  <xacro:arg name="controllers_file" default=""/>
 
   <link name="base">
     <visual>
@@ -194,9 +195,9 @@
   </joint>
 
   <xacro:if value="$(arg use_ros2_control)">
-    <ros2_control name="GazeboSystem" type="system">
+    <ros2_control name="GazeboSimSystem" type="system">
       <hardware>
-        <plugin>gazebo_ros2_control/GazeboSystem</plugin>
+        <plugin>gz_ros2_control/GazeboSimSystem</plugin>
       </hardware>
       <joint name="joint2_to_joint1">
         <command_interface name="position"/>
@@ -231,7 +232,9 @@
     </ros2_control>
 
     <gazebo>
-      <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control"/>
+      <plugin filename="libgz_ros2_control-system.so" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+        <parameters>$(arg controllers_file)</parameters>
+      </plugin>
     </gazebo>
   </xacro:if>
 </robot>

@@ -1,8 +1,14 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    RegisterEventHandler,
+    SetEnvironmentVariable,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration
+from launch.substitutions import Command, EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
@@ -15,16 +21,28 @@ def generate_launch_description():
     gazebo_share = get_package_share_directory('mycobot_pro600_gazebo')
     ros_gz_sim_share = get_package_share_directory('ros_gz_sim')
 
-    default_model = os.path.join(description_share, 'urdf', 'pro600_official_assets.urdf.xacro')
+    default_model = os.path.join(description_share, 'urdf', 'pro600_description.urdf.xacro')
     default_world = os.path.join(gazebo_share, 'worlds', 'empty.world')
+    default_controllers_file = os.path.join(gazebo_share, 'config', 'controllers.yaml')
+    package_share_root = os.path.dirname(description_share)
 
     use_rviz = LaunchConfiguration('use_rviz')
     world = LaunchConfiguration('world')
     model = LaunchConfiguration('model')
+    controllers_file = LaunchConfiguration('controllers_file')
 
-    # Jazzy 默认使用 Gazebo Sim / ros_gz，先加载可视化模型，不绑定 classic gazebo_ros2_control。
+    # 控制器配置以绝对路径传给 Gazebo 插件，避免安装空间和源码空间解析不一致。
     robot_description = ParameterValue(
-        Command(['xacro', ' ', model, ' ', 'use_ros2_control:=false']),
+        Command([
+            'xacro',
+            ' ',
+            model,
+            ' ',
+            'use_ros2_control:=true',
+            ' ',
+            'controllers_file:=',
+            controllers_file,
+        ]),
         value_type=str,
     )
 
@@ -32,7 +50,10 @@ def generate_launch_description():
         package='robot_state_publisher',
         executable='robot_state_publisher',
         output='screen',
-        parameters=[{'robot_description': robot_description}],
+        parameters=[{
+            'robot_description': robot_description,
+            'use_sim_time': True,
+        }],
     )
 
     gz_sim_launch = IncludeLaunchDescription(
@@ -70,6 +91,42 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
+    joint_state_broadcaster_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        output='screen',
+        arguments=[
+            'joint_state_broadcaster',
+            '--controller-manager',
+            '/controller_manager',
+            '--controller-manager-timeout',
+            '60',
+        ],
+    )
+
+    arm_controller_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        output='screen',
+        arguments=[
+            'arm_controller',
+            '--controller-manager',
+            '/controller_manager',
+            '--controller-manager-timeout',
+            '60',
+        ],
+    )
+
+    start_controllers_after_spawn = RegisterEventHandler(
+        OnProcessExit(
+            target_action=spawn_entity,
+            on_exit=[
+                joint_state_broadcaster_spawner,
+                arm_controller_spawner,
+            ],
+        )
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'model',
@@ -82,12 +139,35 @@ def generate_launch_description():
             description='Gazebo Sim world 文件路径。',
         ),
         DeclareLaunchArgument(
+            'controllers_file',
+            default_value=default_controllers_file,
+            description='与所选模型关节名称匹配的 ros2_control 配置。',
+        ),
+        DeclareLaunchArgument(
             'use_rviz',
             default_value='true',
             description='是否同时启动 RViz2。',
         ),
+        SetEnvironmentVariable(
+            name='GZ_SIM_RESOURCE_PATH',
+            value=[
+                package_share_root,
+                ':',
+                EnvironmentVariable('GZ_SIM_RESOURCE_PATH', default_value=''),
+            ],
+        ),
+        SetEnvironmentVariable(
+            name='IGN_GAZEBO_RESOURCE_PATH',
+            value=[
+                package_share_root,
+                ':',
+                EnvironmentVariable('IGN_GAZEBO_RESOURCE_PATH', default_value=''),
+            ],
+        ),
         rsp_node,
         gz_sim_launch,
+        # 先注册事件处理器，避免 create 进程快速退出时漏掉控制器启动事件。
+        start_controllers_after_spawn,
         spawn_entity,
         rviz_node,
     ])

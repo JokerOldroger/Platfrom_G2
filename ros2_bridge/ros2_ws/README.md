@@ -125,13 +125,14 @@ python ros2_bridge/main.py
 
 1. `mycobot_pro600_description`
    - 提供 ROS2 可直接启动的 `xacro`
-   - 当前是简化几何体版本，便于先打通 `robot_state_publisher / rviz2 / gazebo_ros2_control`
+   - Gazebo 默认使用简化几何体模型，保证渲染和关节控制验证不依赖官方 DAE
+   - 官方 Pro600 资产模型继续用于 RViz 展示和后续 mesh 转换
    - 自带 `scripts/import_ros1_assets.py`，用于把官方 `mycobot_ros/noetic/mycobot_pro` 的 `urdf / meshes / scripts` 同步进来做比对
 
 2. `mycobot_pro600_gazebo`
    - 重写了 ROS2 `gazebo.launch.py`
    - 提供 `controllers.yaml`
-   - 使用 `joint_state_broadcaster + joint_trajectory_controller`
+   - 使用 Jazzy 的 `gz_ros2_control + joint_state_broadcaster + joint_trajectory_controller`
 
 ### 先跑 RViz
 
@@ -148,8 +149,49 @@ ros2 launch mycobot_pro600_description display.launch.py
 ```bash
 cd ~/Platform_G2/ros2_bridge/ros2_ws
 source /opt/ros/$ROS_DISTRO/setup.bash
+sudo apt install ros-$ROS_DISTRO-gz-ros2-control
+rm -rf build install log
+colcon build --symlink-install
 source install/setup.bash
-ros2 launch mycobot_pro600_gazebo gazebo.launch.py
+ros2 launch mycobot_pro600_gazebo gazebo.launch.py use_rviz:=false
+```
+
+启动成功后，在第二个终端确认控制器和 Action：
+
+```bash
+cd ~/Platform_G2/ros2_bridge/ros2_ws
+source /opt/ros/$ROS_DISTRO/setup.bash
+source install/setup.bash
+
+ros2 control list_controllers
+ros2 action info /arm_controller/follow_joint_trajectory
+```
+
+预期两个控制器均为 `active`。然后发送一组幅度较小、持续 5 秒的六关节轨迹：
+
+```bash
+ros2 action send_goal /arm_controller/follow_joint_trajectory \
+  control_msgs/action/FollowJointTrajectory \
+  "{trajectory: {joint_names: [joint1, joint2, joint3, joint4, joint5, joint6], points: [{positions: [0.20, -0.30, 0.25, 0.15, -0.15, 0.20], time_from_start: {sec: 5, nanosec: 0}}]}}" \
+  --feedback
+```
+
+测试后回到零位：
+
+```bash
+ros2 action send_goal /arm_controller/follow_joint_trajectory \
+  control_msgs/action/FollowJointTrajectory \
+  "{trajectory: {joint_names: [joint1, joint2, joint3, joint4, joint5, joint6], points: [{positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time_from_start: {sec: 5, nanosec: 0}}]}}" \
+  --feedback
+```
+
+如需切回官方关节链，可同时指定官方模型和对应控制器文件；当前官方 DAE 在 Gazebo
+Ogre2 中仍可能出现 `zero sub-meshes`，因此不作为默认运动验证路径：
+
+```bash
+ros2 launch mycobot_pro600_gazebo gazebo.launch.py \
+  model:=$PWD/install/mycobot_pro600_description/share/mycobot_pro600_description/urdf/pro600_official_assets.urdf.xacro \
+  controllers_file:=$PWD/install/mycobot_pro600_gazebo/share/mycobot_pro600_gazebo/config/controllers_official.yaml
 ```
 
 ### 导入官方 ROS1 资产
